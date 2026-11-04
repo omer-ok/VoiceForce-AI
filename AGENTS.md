@@ -291,7 +291,10 @@ Structured retrieval:
 - Numerical comparisons.
 - Aggregations and averages.
 
-Use DuckDB or an authoritative structured inventory source for these queries.
+Use DuckDB as the mandatory source for historical sales, rental and market
+analytics. Future live property availability must come from a separate,
+authoritative structured inventory source; historical records must never be
+treated as current listings.
 
 Semantic retrieval:
 - Area descriptions.
@@ -301,7 +304,10 @@ Semantic retrieval:
 - Market research.
 - Natural-language knowledge questions.
 
-Use LlamaIndex and Qdrant for these queries.
+Use LlamaIndex to orchestrate semantic retrieval and Qdrant for semantic
+vectors and metadata filtering. LlamaIndex and Qdrant are not sources of
+truth for property availability, and LlamaIndex must not be used for exact
+numerical calculations.
 
 Combine structured and semantic retrieval when the question benefits from both.
 
@@ -314,6 +320,9 @@ Never rely on an LLM to calculate exact transaction statistics when a structured
 The initial real-estate data source is:
 
 https://www.kaggle.com/code/sergionefedov/dubai-real-estate-full-eda-2020-2026/notebook
+
+The first implementation uses only the `secondary_sales.csv` file from this
+source. Other Kaggle CSV files and external data sources are deferred.
 
 Investigate the underlying dataset before implementation.
 
@@ -471,46 +480,61 @@ The browser-to-agent conversation has been verified end-to-end.
 
 Preserve this working integration.
 
-### Milestone 3 — Real Estate Data and Hybrid RAG
+### Milestone 3 — Historical Sales Data Foundation
 
 Current development milestone.
 
-#### Phase 3A — Dataset investigation
-- Inspect Kaggle notebook and underlying dataset.
-- Verify licence and attribution.
-- Inspect schemas, row counts and date coverage.
-- Identify historical versus active inventory records.
-- Present a read-only architecture and implementation plan.
+The initial scope is deliberately limited to one selected source file, subject
+to verification: `secondary_sales.csv` from the Kaggle dataset above.
 
-#### Phase 3B — Data ingestion and DuckDB
-- Build a repeatable CSV ingestion pipeline.
-- Validate and normalize source data.
-- Preserve source identifiers and provenance.
-- Create DuckDB analytical queries.
+Initial implementation architecture:
+- Python for ingestion and data processing.
+- Pandas for CSV handling where appropriate.
+- DuckDB for structured historical property queries and market analytics.
+- The existing LiveKit agent for voice interaction and Python function tools.
+- LlamaIndex and Qdrant remain approved future technologies for semantic
+  retrieval, but are not introduced for numerical transaction records.
+
+#### Phase 3A — Dataset verification
+- Download and inspect the Kaggle source and selected CSV.
+- Verify the actual file, schema, row count, date coverage, data quality,
+  licence and attribution requirements.
+- Confirm that the selected records represent historical secondary sales and
+  are not active property listings.
+- Present a read-only implementation plan and wait for approval.
+
+#### Phase 3B — Cleaning and DuckDB ingestion
+- Use Python and Pandas for CSV handling where appropriate.
+- Validate and clean the selected data.
+- Preserve source identifiers, dates and provenance.
+- Load the cleaned records into DuckDB.
 - Generate data-quality reports.
 
-#### Phase 3C — LlamaIndex and Qdrant
-- Set up local Qdrant.
-- Implement LlamaIndex integration.
-- Select and configure embeddings.
-- Design collection and payload schemas.
-- Implement indexing and retrieval.
-- Make ingestion repeatable and idempotent.
+#### Phase 3C — Historical sales queries
+- Implement structured historical sales queries in DuckDB.
+- Implement area-level market insights and numerical aggregations.
+- Keep exact filters and calculations in DuckDB rather than in vector search
+  or the LLM.
 
-#### Phase 3D — Hybrid retrieval services
-- Implement structured query services.
-- Implement semantic retrieval.
-- Combine retrieval results where useful.
-- Test exact filters and semantic relevance.
-- Preserve source attribution.
+#### Phase 3D — Existing LiveKit agent integration
+- Expose approved historical sales and area-insight queries through Python
+  function tools on the existing LiveKit agent.
+- Preserve the working browser-to-agent voice integration.
+- Test complete voice interactions against the historical sales data.
 
-#### Phase 3E — LiveKit integration
-- Expose approved retrieval capabilities through Python function tools.
-- Integrate historical market intelligence into the receptionist.
-- Preserve existing voice functionality.
-- Test real voice queries against the data.
+The following remain approved for future semantic retrieval but are explicitly
+deferred from this initial implementation:
+- Other Kaggle CSV files.
+- Dubai Land Department integration.
+- Additional external datasets.
+- Qdrant deployment.
+- LlamaIndex indexing.
+- Embedding generation.
+- Advanced hybrid search.
+- PostgreSQL, authentication, CRM and billing.
 
-Do not treat these phases as permission to implement everything without approval.
+Do not introduce LlamaIndex or Qdrant merely to process numerical transaction
+records. Do not treat this scope as permission to implement deferred systems.
 
 ### Milestone 4 — Prime Properties business tools and lead qualification
 - Buy versus rent intent.
@@ -574,42 +598,46 @@ Do not jump ahead or implement future milestones prematurely.
 
 ## 12. Current Development Objective
 
-Our current objective is Milestone 3: Real Estate Data and Hybrid RAG.
+Our current objective is Milestone 3: Historical Sales Data Foundation.
 
-The first task is read-only investigation of the Kaggle dataset.
+The first task is read-only verification of the Kaggle dataset and the
+`secondary_sales.csv` file selected for the initial implementation.
 
 Before writing code:
 1. Inspect the actual repository and Git status.
-2. Inspect the Kaggle notebook and underlying dataset.
-3. Verify the dataset licence and attribution.
-4. Identify which records are useful for market intelligence.
-5. Determine which fields support structured DuckDB queries.
-6. Determine which information benefits from semantic indexing.
-7. Propose the Qdrant collection and payload design.
-8. Propose the LlamaIndex ingestion and retrieval design.
-9. Identify dependencies and testing requirements.
-10. Present the implementation plan and wait for approval.
+2. Inspect the Kaggle notebook and verify the actual downloadable
+   `secondary_sales.csv` file.
+3. Verify the dataset licence and attribution requirements.
+4. Identify the selected file's schema, data quality issues and useful sales
+   and area fields.
+5. Determine the DuckDB table and historical sales query strategy.
+6. Propose the area-level market insight queries.
+7. Propose the Python function-tool interface for the existing LiveKit agent.
+8. Identify only the dependencies and testing requirements needed for this
+   initial scope.
+9. Present the implementation plan and wait for approval.
 
 Do not modify files during the initial investigation.
 
 ### Expected first deliverable
 
 A clear, evidence-based implementation plan containing:
-- Actual dataset files and schemas.
-- Data-quality findings.
+- The verified Kaggle source and selected `secondary_sales.csv` file.
+- The actual schema, data-quality findings and date coverage.
 - Dataset licence and attribution.
-- Proposed ingestion pipeline.
-- DuckDB schema and query strategy.
-- LlamaIndex and Qdrant architecture.
-- Embedding model recommendation.
-- Proposed Qdrant collections and payload indexes.
-- Dependencies.
+- Proposed Python/Pandas ingestion and cleaning pipeline.
+- DuckDB schema, historical sales query strategy and area insights.
+- Proposed LiveKit Python function-tool interface.
+- Minimal dependencies for the initial implementation.
 - Files to create or modify.
 - Testing strategy.
 
 Preserve the completed Milestone 1 and Milestone 2 functionality.
 
-Do not implement CRM, PostgreSQL, authentication, billing, live property feeds or complex dashboards during Milestone 3.
+Do not implement other data sources, Dubai Land Department integration,
+Qdrant, LlamaIndex indexing, embeddings, advanced hybrid search, CRM,
+PostgreSQL, authentication, billing, live property feeds or complex
+dashboards during the initial Milestone 3 implementation.
 
 Prioritise reliable data, accurate retrieval, source transparency and a working voice-agent experience.
 

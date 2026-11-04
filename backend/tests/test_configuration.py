@@ -16,5 +16,5 @@ def test_receptionist_is_grounded_for_initial_milestone() -> None:
     instructions = Receptionist().instructions
 
     assert "Do not invent property availability" in instructions
-    assert "Property search, CRM, and appointment tools" in instructions
-    assert "not available yet" in instructions
+    assert "Historical sales tools are available" in instructions
+    assert "cannot verify live availability" in instructions
