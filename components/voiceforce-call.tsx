@@ -1,0 +1,218 @@
+"use client";
+
+import {
+  RoomAudioRenderer,
+  SessionProvider,
+  useAgent,
+  useSession,
+  useSessionContext,
+  useSessionMessages,
+} from "@livekit/components-react";
+import { TokenSource } from "livekit-client";
+import { useState } from "react";
+
+const AGENT_NAME = "voiceforce-receptionist";
+const AGENT_DEPLOYMENT =
+  process.env.NODE_ENV === "development" ? "dev" : undefined;
+const TOKEN_SOURCE = TokenSource.endpoint("/api/token");
+
+export default function VoiceForceCall() {
+  const session = useSession(TOKEN_SOURCE, {
+    agentName: AGENT_NAME,
+    deployment: AGENT_DEPLOYMENT,
+  });
+
+  return (
+    <SessionProvider session={session}>
+      <CallPanel />
+    </SessionProvider>
+  );
+}
+
+function CallPanel() {
+  const session = useSessionContext();
+  const agent = useAgent(session);
+  const { messages } = useSessionMessages(session);
+  const [isStarting, setIsStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function startCall() {
+    if (isStarting || session.isConnected) {
+      return;
+    }
+
+    setError(null);
+    setIsStarting(true);
+
+    try {
+      await session.start({
+        tracks: {
+          microphone: { enabled: true },
+        },
+      });
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Unable to start the call.",
+      );
+      await session.end().catch(() => undefined);
+    } finally {
+      setIsStarting(false);
+    }
+  }
+
+  async function endCall() {
+    setError(null);
+    await session.end();
+  }
+
+  const status = getStatus(agent.state, isStarting);
+  const isActive = isStarting || session.isConnected || agent.isPending;
+
+  return (
+    <section className="grid w-full gap-8 lg:grid-cols-[1.1fr_0.9fr]">
+      <div className="rounded-3xl border border-white/10 bg-white/[0.07] p-8 shadow-2xl shadow-black/20 backdrop-blur sm:p-10">
+        <p className="mb-4 text-sm font-medium uppercase tracking-[0.28em] text-cyan-300">
+          Prime Properties Dubai
+        </p>
+        <h1 className="max-w-xl text-4xl font-semibold tracking-tight text-white sm:text-6xl">
+          Talk to your AI receptionist.
+        </h1>
+        <p className="mt-6 max-w-xl text-base leading-7 text-slate-300 sm:text-lg">
+          Ask a question, share what you are looking for, or leave a message
+          for the team. Start a private voice conversation whenever you are
+          ready.
+        </p>
+
+        <div className="mt-10 flex flex-wrap items-center gap-3">
+          <button
+            className="rounded-full bg-cyan-300 px-6 py-3 font-semibold text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={isActive}
+            onClick={() => void startCall()}
+            type="button"
+          >
+            {isStarting ? "Connecting…" : "Start Call"}
+          </button>
+          <button
+            className="rounded-full border border-white/20 px-6 py-3 font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!isActive}
+            onClick={() => void endCall()}
+            type="button"
+          >
+            End Call
+          </button>
+        </div>
+
+        <div className="mt-8 flex items-center gap-3 text-sm text-slate-300">
+          <span
+            aria-hidden="true"
+            className={`h-2.5 w-2.5 rounded-full ${getStatusColor(agent.state)}`}
+          />
+          <span>{status}</span>
+        </div>
+
+        {error ? (
+          <p className="mt-4 rounded-2xl border border-red-300/20 bg-red-400/10 px-4 py-3 text-sm text-red-200">
+            {error}
+          </p>
+        ) : null}
+      </div>
+
+      <div className="flex min-h-[28rem] flex-col rounded-3xl border border-white/10 bg-slate-950/60 p-5 shadow-2xl shadow-black/20 backdrop-blur sm:p-6">
+        <div className="flex items-center justify-between border-b border-white/10 pb-4">
+          <div>
+            <p className="font-medium text-white">Conversation</p>
+            <p className="mt-1 text-xs text-slate-400">
+              Live transcripts appear here during the call.
+            </p>
+          </div>
+          <span className="rounded-full border border-white/10 px-3 py-1 text-xs text-slate-400">
+            {agent.state}
+          </span>
+        </div>
+
+        <div
+          aria-live="polite"
+          className="flex flex-1 flex-col gap-3 overflow-y-auto py-5"
+          role="log"
+        >
+          {messages.length === 0 ? (
+            <p className="m-auto max-w-xs text-center text-sm leading-6 text-slate-500">
+              Start a call to begin speaking with the VoiceForce receptionist.
+            </p>
+          ) : (
+            messages.map((message) => {
+              const isAgentMessage = message.type === "agentTranscript";
+
+              return (
+                <div
+                  className={`max-w-[90%] rounded-2xl px-4 py-3 text-sm leading-6 ${
+                    isAgentMessage
+                      ? "self-start bg-white/10 text-slate-200"
+                      : "self-end bg-cyan-300/15 text-cyan-50"
+                  }`}
+                  key={message.id}
+                >
+                  <p className="mb-1 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                    {isAgentMessage ? "Receptionist" : "You"}
+                  </p>
+                  <p>{message.message}</p>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      <RoomAudioRenderer />
+    </section>
+  );
+}
+
+function getStatus(
+  state: ReturnType<typeof useAgent>["state"],
+  isStarting: boolean,
+) {
+  if (isStarting || state === "connecting") {
+    return "Connecting to the receptionist…";
+  }
+
+  if (state === "speaking") {
+    return "The receptionist is speaking";
+  }
+
+  if (state === "thinking") {
+    return "The receptionist is thinking";
+  }
+
+  if (state === "listening") {
+    return "Listening to you";
+  }
+
+  if (state === "failed") {
+    return "The call could not connect";
+  }
+
+  if (state === "disconnected") {
+    return "Ready to start a call";
+  }
+
+  return "Preparing the receptionist…";
+}
+
+function getStatusColor(state: ReturnType<typeof useAgent>["state"]) {
+  if (state === "speaking") {
+    return "bg-cyan-300 shadow-[0_0_18px_rgba(103,232,249,0.9)]";
+  }
+
+  if (state === "listening") {
+    return "bg-emerald-300 shadow-[0_0_18px_rgba(110,231,183,0.9)]";
+  }
+
+  if (state === "failed") {
+    return "bg-red-300";
+  }
+
+  return "bg-amber-300";
+}
