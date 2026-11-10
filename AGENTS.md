@@ -536,13 +536,63 @@ deferred from this initial implementation:
 Do not introduce LlamaIndex or Qdrant merely to process numerical transaction
 records. Do not treat this scope as permission to implement deferred systems.
 
-### Milestone 4 — Prime Properties business tools and lead qualification
-- Buy versus rent intent.
-- Customer preference collection.
-- Budget qualification.
-- Property search against verified active inventory when available.
-- Lead capture.
-- Structured customer information.
+### Milestone 4: AI Property Sales Agent
+
+Transform the existing VoiceForce AI receptionist into an interactive Dubai property sales consultant for the Prime Properties demo.
+
+**Core capabilities**
+
+1. **Buy vs Rent Intent**
+   - Understand whether the customer wants to buy or rent.
+   - Ask clarifying questions when intent is unclear.
+
+2. **Customer Preference Collection**
+   - Preferred Dubai community or location.
+   - Property type: apartment, villa, townhouse, penthouse or studio.
+   - Number of bedrooms and bathrooms.
+   - Furnishing preferences.
+   - Ready or off-plan preference.
+
+3. **Budget Qualification**
+   - Understand the customer's budget in AED.
+   - Distinguish purchase budgets from annual rental budgets.
+   - Ask follow-up questions when budget information is incomplete.
+
+4. **Property Search**
+   - Search the existing DuckDB `demo_property_listings` table.
+   - Filter by transaction type, location, property type, bedrooms and budget.
+   - Return matching properties with their IDs, prices and details.
+   - Recommend the most relevant matching properties.
+   - Clearly identify all demo inventory as synthetic and simulated.
+   - Never claim simulated availability is verified or real.
+
+5. **Lead Capture**
+   - Collect customer name and contact number when appropriate.
+   - Capture buying/renting intent, budget and property preferences.
+   - Ask for customer consent before saving contact information.
+   - Store demo leads in a separate DuckDB table.
+   - Do not introduce CRM integrations in this milestone.
+
+6. **Structured Customer Information**
+   - Maintain customer preferences throughout the conversation.
+   - Avoid repeatedly asking questions already answered.
+   - Return a structured customer enquiry/lead object.
+   - Confirm important customer details before saving.
+
+**Technical constraints**
+
+- Use the existing Python LiveKit Agent and function tools.
+- Use DuckDB for property search and demo lead storage.
+- Preserve the existing `secondary_sales` historical dataset.
+- Keep `demo_property_listings` separate from historical sales.
+- Keep the existing LiveKit STT, LLM, TTS and Next.js integration unchanged.
+- Do not introduce Qdrant, LlamaIndex, PostgreSQL, authentication or CRM integrations yet.
+- Do not invent property records or availability.
+- Make the distinction between simulated demo inventory and verified live inventory explicit.
+
+**Expected outcome**
+
+A customer can have a natural voice conversation with the Prime Properties AI sales consultant, describe their requirements, receive matching demo property recommendations, and submit a structured enquiry with their consent.
 
 ### Milestone 5 — Appointment and viewing workflow
 - Customer availability collection.
@@ -642,6 +692,486 @@ dashboards during the initial Milestone 3 implementation.
 Prioritise reliable data, accurate retrieval, source transparency and a working voice-agent experience.
 
 ---
+
+
+## 13. VoiceForce AI — Voice Performance and Latency Optimisation
+
+### 13.1 Immediate Engineering Objective
+
+Our immediate engineering priority is to minimise voice-agent response latency while improving speech detection accuracy and natural conversational turn-taking.
+
+The objective is to make VoiceForce AI feel like a real-time human conversation.
+
+This is a parallel performance optimisation workstream. It does not automatically replace or cancel the existing project milestones.
+
+### 13.2 Existing Approved Voice Stack
+
+Verify actual implementation before making assumptions.
+
+- Audio transport: LiveKit Cloud / WebRTC.
+- Agent runtime: Python LiveKit Agents.
+- Session orchestration: AgentSession.
+- STT: AssemblyAI Universal-3-6-Pro through LiveKit Inference.
+- LLM: OpenAI GPT-5 Mini through LiveKit Inference.
+- TTS: Fish Audio S2.1 Pro through LiveKit Inference.
+- Turn detection: LiveKit turn detection.
+
+Do not replace these components without measured evidence and an approved technical proposal.
+
+### 13.3 Performance Objectives
+
+Prioritise:
+
+1. Reduce end-of-turn-to-first-audio latency.
+2. Improve VAD speech-start detection.
+3. Improve end-of-speech detection.
+4. Reduce unnecessary silence waiting.
+5. Optimise STT streaming and endpointing.
+6. Reduce LLM time-to-first-token.
+7. Reduce TTS time-to-first-audio.
+8. Optimise audio buffering and playback.
+9. Improve barge-in and interruption handling.
+10. Maintain reliable performance in noisy environments.
+
+### 13.4 Required Performance Metrics
+
+Instrument and measure:
+
+- End-of-turn-to-first-audio latency.
+- P50, P90 and P95 latency.
+- VAD speech-start detection delay.
+- End-of-speech detection delay.
+- STT transcription delay.
+- LLM time-to-first-token (TTFT).
+- TTS time-to-first-audio (TTFA).
+- Audio playback startup delay.
+- False endpoint rate.
+- Missed speech rate.
+- Transcription accuracy.
+- Barge-in success rate.
+
+Use existing LiveKit observability and metrics wherever possible.
+
+Do not invent measurements or report targets as achieved results.
+
+### 13.5 Speech Detection and Turn-Taking
+
+Investigate:
+
+- LiveKit VAD configuration.
+- AssemblyAI endpointing and interim transcription.
+- Speech probability thresholds.
+- Audio frame duration.
+- Silence timeout.
+- Adaptive end-of-turn detection.
+- Acoustic echo and background noise.
+- False speech detection.
+- Premature interruption.
+- User interruption while the agent is speaking.
+
+Distinguish speech detection from conversational turn completion.
+
+Do not reduce silence thresholds blindly. Preserve natural conversational pauses and avoid cutting users off.
+
+### 13.6 Streaming and Latency Optimisation
+
+Investigate:
+
+- Streaming STT.
+- Streaming LLM generation.
+- Preemptive LLM generation where appropriate.
+- Streaming TTS.
+- Sentence-level or phrase-level audio generation.
+- Asynchronous processing.
+- Unnecessary sequential operations.
+- Audio buffering and playback.
+- WebRTC transport overhead.
+- Tool execution latency.
+
+The agent should begin generating and playing audio as early as safely possible without waiting unnecessarily for the complete response.
+
+### 13.7 Evaluation Scenarios
+
+Test:
+
+- Normal conversational speech.
+- Fast speech.
+- Slow speech with natural pauses.
+- Short acknowledgements.
+- Background noise.
+- Laptop microphone and speakers.
+- Acoustic echo.
+- User interruption.
+- English and Urdu speech.
+
+The existing noisy-room laptop microphone and speaker test should be retained as an evaluation scenario.
+
+### 13.8 Engineering Workflow
+
+Before optimisation:
+
+1. Inspect the existing implementation.
+2. Review Git status and preserve unrelated changes.
+3. Consult installed LiveKit Agent Skills and official documentation.
+4. Trace the complete audio pipeline.
+5. Instrument existing components.
+6. Establish baseline measurements.
+7. Identify the largest bottleneck.
+8. Present a prioritised optimisation proposal.
+
+After approval:
+
+1. Implement one optimisation at a time.
+2. Run relevant automated tests.
+3. Repeat the same benchmark scenarios.
+4. Compare before-and-after metrics.
+5. Document regressions and trade-offs.
+6. Preserve working browser-to-agent integration.
+
+Do not rewrite the voice architecture without evidence.
+
+### 13.9 Definition of Done
+
+An optimisation is complete only when:
+
+- The bottleneck has been identified.
+- The technical change is documented.
+- Tests have been executed.
+- Before-and-after measurements are available.
+- Latency improvement is demonstrated.
+- Speech detection quality has not regressed.
+- Existing voice interactions continue working.
+
+### 13.10 Immediate First Task
+
+Conduct a READ-ONLY technical audit of the existing VoiceForce AI voice pipeline.
+
+Deliver:
+
+1. Actual voice architecture and component configuration.
+2. Complete audio processing flow.
+3. Existing latency instrumentation.
+4. Identified performance bottlenecks.
+5. Baseline benchmark plan.
+6. Prioritised optimisation recommendations.
+7. Files that would need modification.
+8. Testing and evaluation strategy.
+
+Do not modify application code during this initial audit.
+
+Wait for explicit approval before implementation.
+
+
+# 14. VoiceForce AI — Multilingual Speech Module (English, Arabic & Urdu)
+
+## 14.1 Objective
+
+Extend the existing VoiceForce AI voice agent to support natural, real-time conversations in:
+
+- English (`en`)
+- Arabic (`ar`)
+- Urdu (`ur`)
+
+The initial target markets are UAE and Pakistan.
+
+The agent must understand and respond in the customer's preferred language, with natural pronunciation, minimal response latency and reliable conversational turn-taking.
+
+This is a parallel capability workstream. It must preserve the existing English implementation and must not automatically replace or cancel the existing project milestones.
+
+## 14.2 Approved Architecture
+
+Preserve the existing architecture:
+
+- LiveKit Cloud / WebRTC for audio transport.
+- Python LiveKit Agents for agent execution.
+- AgentSession for conversation orchestration.
+- LiveKit Inference for speech and language models.
+- OpenAI GPT-5 Mini for LLM inference initially.
+- Existing Python function tools and business logic.
+- Existing Next.js frontend.
+
+Keep speech providers configurable and isolated behind application-level configuration.
+
+Do not introduce local speech models, separate Whisper infrastructure, RealtimeTTS servers or unnecessary microservices.
+
+## 14.3 Speech-to-Text (STT)
+
+Primary candidate:
+
+AssemblyAI Universal-3.6 Pro through LiveKit Inference.
+
+Model:
+`assemblyai/universal-3-6-pro`
+
+Required languages:
+- English
+- Arabic
+- Urdu
+
+Requirements:
+
+- Streaming speech recognition.
+- Automatic language detection.
+- Language confidence metadata.
+- English, Arabic and Urdu code-switching.
+- Support for natural Pakistani Urdu.
+- Arabic recognition suitable for UAE customers.
+- Accurate recognition of property terminology, locations, names and prices.
+- Interim transcription where supported.
+- Low-latency endpointing.
+
+Investigate:
+
+- `language_detection`
+- `language_codes`
+- `mode="min_latency"`
+- `keyterms_prompt`
+- Streaming partial transcripts.
+- `min_turn_silence` and `max_turn_silence`.
+- STT endpointing and VAD interaction.
+
+Benchmark minimum-latency and balanced configurations. Do not sacrifice transcription accuracy or natural conversational pauses simply to reduce latency.
+
+Do not assume Roman Urdu and Urdu-script transcription perform equally well. Evaluate both separately.
+
+## 14.4 Text-to-Speech (TTS)
+
+Primary candidates:
+
+1. Inworld Realtime TTS 2 Flash:
+   `inworld/inworld-tts-2-flash`
+
+2. Inworld Realtime TTS 2:
+   `inworld/inworld-tts-2`
+
+Both are candidates for Arabic and Urdu speech generation through LiveKit Inference.
+
+Evaluate:
+
+- Time to first audio (TTFA).
+- Streaming audio generation.
+- P50, P90 and P95 latency.
+- Arabic pronunciation and fluency.
+- Pakistani Urdu pronunciation and fluency.
+- Voice naturalness.
+- Voice consistency.
+- Numbers, dates, currencies and property terminology.
+- Audio stability during long responses.
+
+Keep Fish Audio S2.1 Pro as the existing English baseline until benchmark results justify a change.
+
+Do not assume Fish Audio S2.1 Pro supports Urdu.
+
+Do not select a TTS provider solely on advertised speed or language coverage. Verify actual voice availability, quality and streaming behaviour.
+
+Maintain configurable voice IDs for each supported language.
+
+## 14.5 Multilingual Language Router
+
+Implement a lightweight language-routing component.
+
+Responsibilities:
+
+- Identify the customer's spoken language using STT language metadata.
+- Support English, Arabic and Urdu.
+- Preserve the customer's preferred language throughout the conversation.
+- Handle natural language switching.
+- Support English-Urdu and English-Arabic mixed speech.
+- Route the response to the appropriate TTS voice.
+- Avoid unnecessary language-detection LLM calls.
+
+Language detection must not introduce an additional sequential network request.
+
+Use confidence thresholds and conversation context to prevent unnecessary language switching.
+
+If detection confidence is low, retain the existing conversation language or ask a short clarification when necessary.
+
+Do not automatically translate the customer's message into English unless the business operation requires it.
+
+## 14.6 LLM Response Behaviour
+
+The LLM must:
+
+- Respond in the customer's preferred language.
+- Understand English, Arabic and Pakistani Urdu.
+- Handle mixed-language conversations naturally.
+- Preserve names, addresses, numbers and property terminology.
+- Avoid unnecessary English translations.
+- Use concise, conversational sentences suitable for spoken delivery.
+- Maintain the same business rules and tool permissions across all languages.
+
+Arabic responses must use natural conversational Arabic appropriate for UAE customers. Evaluate Modern Standard Arabic and Gulf conversational Arabic.
+
+Urdu responses must use natural Pakistani Urdu rather than Hindi-style vocabulary.
+
+Maintain one consistent agent identity and business personality across languages.
+
+## 14.7 Low-Latency Requirements
+
+Prioritise:
+
+- Streaming STT.
+- Early language identification.
+- Streaming LLM generation.
+- Streaming TTS.
+- Sentence-level or phrase-level audio generation.
+- Minimal additional processing between pipeline stages.
+- Early audio playback.
+- Reliable interruption handling.
+- Efficient audio buffering.
+- Avoiding unnecessary sequential model calls.
+
+The language router must operate locally within the agent process wherever possible.
+
+Do not wait for the complete LLM response before beginning TTS when the provider and LiveKit integration support safe streaming.
+
+Do not change the existing VAD and endpointing configuration without controlled benchmark comparisons.
+
+## 14.8 Performance Instrumentation
+
+Extend existing latency instrumentation with language-specific dimensions.
+
+Capture:
+
+- `language_code`
+- `language_confidence`
+- `stt_ttft`
+- `stt_final_transcript_delay`
+- `language_detection_delay`
+- `llm_ttft`
+- `llm_generation_duration`
+- `tts_ttfa`
+- `tts_generation_duration`
+- `end_of_turn_to_first_audio`
+- `e2e_latency`
+- `barge_in_success`
+- `transcription_accuracy`
+
+All latency metrics must be segmented by language and provider configuration.
+
+Do not log raw customer speech, transcripts or personally identifiable information unnecessarily.
+
+Use the existing anonymized telemetry infrastructure.
+
+Report P50, P90 and P95 with sample counts.
+
+## 14.9 Evaluation Scenarios
+
+Test each language independently and in mixed-language conversations.
+
+English:
+- Existing receptionist conversations.
+- Property enquiries.
+- Buy and rent qualification.
+
+Arabic:
+- UAE conversational Arabic.
+- Modern Standard Arabic.
+- Property enquiries.
+- Arabic numbers, locations and prices.
+
+Urdu:
+- Pakistani conversational Urdu.
+- Urdu script.
+- Roman Urdu.
+- Property enquiries.
+- Pakistani accents and natural speaking speed.
+
+Mixed-language scenarios:
+- English and Urdu.
+- English and Arabic.
+- Urdu and English property terminology.
+- Arabic and English property terminology.
+- Switching language during an active conversation.
+
+Audio conditions:
+- Normal speech.
+- Fast speech.
+- Slow speech and natural pauses.
+- Background noise.
+- Laptop microphone and speakers.
+- Acoustic echo.
+- User interruptions.
+- Short acknowledgements.
+
+## 14.10 Benchmark and Definition of Done
+
+Run the same benchmark methodology against the existing English baseline.
+
+For each language and provider combination, report:
+
+- STT accuracy.
+- Language detection accuracy.
+- LLM TTFT.
+- TTS TTFA.
+- End-of-turn-to-first-audio latency.
+- End-to-end P50, P90 and P95.
+- Interruption success rate.
+- Provider cost per minute.
+
+Suggested initial engineering targets, not achieved results:
+
+- STT finalization: P50 under 500 ms after actual end of speech.
+- TTS first audio: P50 under 500 ms after the first eligible text chunk.
+- End-of-turn-to-first-audio: P50 under 1.5 seconds.
+- End-to-end latency: P50 under 2 seconds where the interaction and measurement definition permit.
+- No significant regression in English performance.
+- No material regression in speech recognition accuracy.
+
+Measure these targets using clearly defined timestamps and sufficient sample sizes. Separate endpointing delay from provider processing latency.
+
+## 14.11 Implementation Workflow
+
+Before implementation:
+
+1. Inspect the actual repository and Git status.
+2. Inspect the existing STT, LLM, TTS and AgentSession implementation.
+3. Read the installed LiveKit Agent Skills and official documentation.
+4. Verify current model availability and language support.
+5. Verify dynamic language and TTS voice switching APIs.
+6. Verify provider voice availability and regional support.
+7. Establish the existing English benchmark.
+8. Prepare a read-only technical implementation proposal.
+
+After approval:
+
+1. Implement multilingual STT configuration.
+2. Implement language detection and routing.
+3. Integrate and benchmark multilingual TTS.
+4. Implement multilingual response instructions.
+5. Add language-specific telemetry.
+6. Run automated and real-world voice evaluations.
+7. Compare before-and-after performance.
+8. Document provider costs, latency and limitations.
+
+Implement incrementally. Preserve the existing working English browser-to-agent integration.
+
+Do not introduce unnecessary dependencies or rewrite unrelated application components.
+
+## 14.12 Immediate First Task
+
+Conduct a READ-ONLY audit and research task.
+
+Deliver:
+
+- Verified Arabic and Urdu STT options.
+- Verified Arabic and Urdu TTS options.
+- Recommended provider combinations.
+- Current LiveKit integration compatibility.
+- Dynamic language-switching architecture.
+- Voice availability and pronunciation considerations.
+- Provider latency and pricing comparison.
+- Proposed language-router implementation.
+- Required files and configuration changes.
+- Multilingual benchmark and testing plan.
+- Risks, limitations and fallback strategy.
+
+Do not modify application code during this initial investigation.
+
+Wait for explicit approval before implementation.
+
+The ultimate objective is a production-quality multilingual VoiceForce AI receptionist that can naturally communicate with customers in English, Arabic and Pakistani Urdu without compromising the existing English experience or voice-response latency.
+
 
 <!-- BEGIN:nextjs-agent-rules -->
 

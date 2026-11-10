@@ -1,0 +1,151 @@
+# Controlled benchmark scenarios for the local `lk agent debugger --audio` runs.
+#
+# Keep the spoken turns, language, audio mode, and environment metadata fixed
+# between cold and warm runs. These scenarios exercise the existing demo tools;
+# they do not change provider, model, VAD, turn detection, or database behavior.
+# The demo inventory is synthetic, so expectations never assert live availability
+# or a particular property ID unless the run is separately seeded and graded.
+id: SCNG_voiceforce_latency_20261107
+name: VoiceForce isolated latency benchmark
+scenarios:
+  - id: SCN_latency_greeting_clarification
+    label: Greeting and buy-or-rent clarification
+    instructions: |
+      PERSONA: You are a concise English-speaking caller. Speak at a normal pace
+      in a quiet room and answer one question at a time.
+      OPENING LINE: "Hi, I am looking for a property in Dubai."
+      DO, IN ORDER:
+      1. Wait for the receptionist to clarify whether you want to buy or rent.
+      2. Answer only the clarification question, then end the call politely.
+    agent_expectations: >
+      The receptionist responds naturally, asks whether the caller wants to buy
+      or rent, and does not invent a property recommendation before the intent
+      is known.
+    tags:
+      feature: latency_benchmark
+      scenario_type: greeting_clarification
+      language: en
+      audio_mode: true
+      noise_condition: quiet
+      cold_warm: both
+
+  - id: SCN_latency_property_search_one_tool
+    label: One property search tool call
+    instructions: |
+      PERSONA: You are an English-speaking caller in a quiet room. Speak at a
+      normal pace and volunteer the requirements in the opening line.
+      OPENING LINE: "I want to rent a two-bedroom apartment in Dubai Marina for
+      up to 140,000 AED per year."
+      DO, IN ORDER:
+      1. Answer one follow-up question if the receptionist asks for a missing
+         search detail.
+      2. Do not add a second request or ask for historical market statistics.
+      3. End after the receptionist presents the search result.
+    agent_expectations: >
+      The receptionist performs one focused demo-property search using the
+      caller's rental, Dubai Marina, two-bedroom, and annual-budget constraints;
+      it presents only returned synthetic demo inventory, clearly labels the
+      result as simulated, and does not claim verified live availability.
+    tags:
+      feature: latency_benchmark
+      scenario_type: one_tool_property_search
+      language: en
+      audio_mode: true
+      noise_condition: quiet
+      cold_warm: both
+
+  - id: SCN_latency_property_search_no_results
+    label: Property search with no results
+    instructions: |
+      PERSONA: You are an English-speaking caller in a quiet room. Speak at a
+      normal pace and keep the request unchanged.
+      OPENING LINE: "I want to buy a six-bedroom apartment in Al Barsha for 1 AED."
+      DO, IN ORDER:
+      1. Answer any clarification question with the same requirements.
+      2. Do not relax a filter unless the receptionist asks which one to relax.
+      3. End after the receptionist explains the result.
+    agent_expectations: >
+      The receptionist reports that the supplied demo search returned no
+      matches, identifies the relevant constraints, offers to relax a filter,
+      and does not invent a property, price, or availability.
+    tags:
+      feature: latency_benchmark
+      scenario_type: no_results
+      language: en
+      audio_mode: true
+      noise_condition: quiet
+      cold_warm: both
+
+  - id: SCN_latency_change_rental_to_sale
+    label: Follow-up changes rental intent to sale
+    instructions: |
+      PERSONA: You are an English-speaking caller in a quiet room. Speak at a
+      normal pace and correct yourself once.
+      OPENING LINE: "I am looking to rent a one-bedroom apartment in Jumeirah
+      Village Circle for 80,000 AED a year."
+      DO, IN ORDER:
+      1. After the receptionist acknowledges the rental request, say: "Actually,
+         I want to buy, not rent. My purchase budget is 900,000 AED."
+      2. Keep the one-bedroom and community preferences unchanged.
+      3. End after the receptionist acknowledges the corrected intent or returns
+         a result.
+    agent_expectations: >
+      The final search state uses sale intent and a purchase budget, not the
+      earlier annual-rent budget; the receptionist keeps the unchanged location
+      and bedroom preferences, and never mixes rental and purchase amounts.
+    tags:
+      feature: latency_benchmark
+      scenario_type: intent_correction
+      language: en
+      audio_mode: true
+      noise_condition: quiet
+      cold_warm: both
+
+  - id: SCN_latency_clear_budget
+    label: Follow-up clears an existing budget
+    instructions: |
+      PERSONA: You are an English-speaking caller in a quiet room. Speak at a
+      normal pace and explicitly remove one previously supplied preference.
+      OPENING LINE: "I want to buy an apartment in Dubai Hills with a budget of
+      2,000,000 AED."
+      DO, IN ORDER:
+      1. Answer any clarification question without adding a new budget.
+      2. Then say: "Please remove the budget and search without a price limit."
+      3. End after the receptionist confirms the updated request or returns a
+         result.
+    agent_expectations: >
+      The receptionist treats the second instruction as an explicit budget
+      clear, does not retain 2,000,000 AED as an active filter, and does not
+      claim a result that was not returned by the demo search.
+    tags:
+      feature: latency_benchmark
+      scenario_type: filter_clearing
+      language: en
+      audio_mode: true
+      noise_condition: quiet
+      cold_warm: both
+
+  - id: SCN_latency_longer_multi_result_response
+    label: Longer response with several demo results
+    instructions: |
+      PERSONA: You are an English-speaking caller in a quiet room. Speak at a
+      normal pace and listen for the complete answer.
+      OPENING LINE: "Show me several simulated sale apartments in Dubai under
+      3,000,000 AED, with no community preference."
+      DO, IN ORDER:
+      1. If asked to clarify, repeat that any Dubai community is acceptable and
+         the maximum purchase budget is 3,000,000 AED.
+      2. Ask the receptionist to give the key details for several returned
+         properties, one after another.
+      3. End after the receptionist finishes the response.
+    agent_expectations: >
+      The receptionist uses the demo inventory search, gives only details that
+      came from returned records, labels the inventory as synthetic or simulated,
+      and does not claim verified current availability or invent extra results.
+    tags:
+      feature: latency_benchmark
+      scenario_type: longer_multi_result_response
+      language: en
+      audio_mode: true
+      noise_condition: quiet
+      cold_warm: both

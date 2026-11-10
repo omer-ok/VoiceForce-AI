@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import duckdb
 import pandas as pd
 import pytest
+from livekit.agents.llm import ToolError
 
 from voiceforce_agent.receptionist import Receptionist
 from voiceforce_agent.sales_data import EXPECTED_COLUMNS
@@ -170,23 +172,37 @@ def test_receptionist_registers_historical_sales_tools(tmp_path, monkeypatch) ->
     receptionist = Receptionist()
     tool_ids = {tool.id for tool in receptionist.tools}
 
-    assert tool_ids == {
+    assert {
         "search_historical_sales",
         "get_market_insights",
         "compare_areas",
-    }
+    } <= tool_ids
+    assert {"search_demo_properties", "capture_customer_lead"} <= tool_ids
     assert "historical dataset records" in receptionist.instructions
     assert "cannot verify live availability" in receptionist.instructions
 
     descriptions = {tool.id: tool.info.description for tool in receptionist.tools}
-    assert all("USD" in description for description in descriptions.values())
+    historical_descriptions = [
+        descriptions[tool_id]
+        for tool_id in (
+            "search_historical_sales",
+            "get_market_insights",
+            "compare_areas",
+        )
+    ]
+    assert all("USD" in description for description in historical_descriptions)
     assert all(
-        "historical" in description.lower() for description in descriptions.values()
+        "historical" in description.lower() for description in historical_descriptions
     )
     assert all(
         "current" in description.lower() or "live" in description.lower()
-        for description in descriptions.values()
+        for description in historical_descriptions
     )
+    assert "simulated" in descriptions["search_demo_properties"].lower()
+    assert "[2, 3]" in descriptions["search_demo_properties"]
+    assert "clear_community" in descriptions["search_demo_properties"]
+    assert "clear_furnishing" in descriptions["search_demo_properties"]
+    assert "consent" in descriptions["capture_customer_lead"].lower()
 
     result = asyncio.run(
         receptionist._run_sales_tool(
@@ -195,3 +211,16 @@ def test_receptionist_registers_historical_sales_tools(tmp_path, monkeypatch) ->
         )
     )
     assert result["summary"]["record_count"] == 1
+
+
+def test_property_tool_separates_technical_errors_from_no_results(caplog) -> None:
+    receptionist = Receptionist()
+
+    def failing_operation() -> None:
+        raise RuntimeError("secret database connection detail")
+
+    with caplog.at_level(logging.ERROR), pytest.raises(ToolError) as error:
+        asyncio.run(receptionist._run_property_tool(failing_operation))
+
+    assert "secret database connection detail" not in str(error.value)
+    assert "Demo property search failed" in caplog.text

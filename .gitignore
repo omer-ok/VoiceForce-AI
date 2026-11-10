@@ -20,6 +20,10 @@
 # production
 /build
 
+# local latency benchmark output
+/data/latency_metrics*.jsonl
+/backend/data/latency_metrics*.jsonl
+
 # misc
 .DS_Store
 *.pem

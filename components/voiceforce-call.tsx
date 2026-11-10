@@ -1,15 +1,16 @@
 "use client";
 
 import {
-  RoomAudioRenderer,
   SessionProvider,
   useAgent,
   useSession,
   useSessionContext,
   useSessionMessages,
 } from "@livekit/components-react";
-import { TokenSource } from "livekit-client";
-import { useState } from "react";
+import { RoomEvent, TokenSource } from "livekit-client";
+import { useEffect, useState } from "react";
+
+import VoiceForceLatency from "@/components/voiceforce-latency";
 
 const AGENT_NAME = "voiceforce-receptionist";
 const AGENT_DEPLOYMENT =
@@ -35,6 +36,50 @@ function CallPanel() {
   const { messages } = useSessionMessages(session);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [welcomeStatus, setWelcomeStatus] = useState<WelcomeStatus>({
+    phase: "idle",
+  });
+
+  useEffect(() => {
+    const room = session.room;
+
+    function onDataReceived(
+      payload: Uint8Array,
+      _participant: unknown,
+      _kind: unknown,
+      topic?: string,
+    ) {
+      if (topic !== "voiceforce_welcome") return;
+
+      try {
+        const decoded = JSON.parse(new TextDecoder().decode(payload)) as {
+          type?: string;
+          phase?: WelcomeStatus["phase"];
+          language?: string | null;
+          label?: string;
+          active_agent?: string;
+          error_type?: string;
+        };
+        if (decoded.type !== "voiceforce_welcome_status" || !decoded.phase) {
+          return;
+        }
+        setWelcomeStatus({
+          phase: decoded.phase,
+          language: decoded.language ?? null,
+          label: decoded.label,
+          activeAgent: decoded.active_agent,
+          errorType: decoded.error_type,
+        });
+      } catch {
+        // Ignore unrelated or malformed data packets from other participants.
+      }
+    }
+
+    room.on(RoomEvent.DataReceived, onDataReceived);
+    return () => {
+      room.off(RoomEvent.DataReceived, onDataReceived);
+    };
+  }, [session.room]);
 
   async function startCall() {
     if (isStarting || session.isConnected) {
@@ -42,6 +87,7 @@ function CallPanel() {
     }
 
     setError(null);
+    setWelcomeStatus({ phase: "idle" });
     setIsStarting(true);
 
     try {
@@ -65,9 +111,10 @@ function CallPanel() {
   async function endCall() {
     setError(null);
     await session.end();
+    setWelcomeStatus({ phase: "idle" });
   }
 
-  const status = getStatus(agent.state, isStarting);
+  const status = getStatus(agent.state, isStarting, welcomeStatus);
   const isActive = isStarting || session.isConnected || agent.isPending;
 
   return (
@@ -111,6 +158,17 @@ function CallPanel() {
           />
           <span>{status}</span>
         </div>
+
+        {welcomeStatus.phase !== "idle" ? (
+          <div className="mt-4 rounded-2xl border border-cyan-300/15 bg-cyan-300/5 px-4 py-3 text-sm text-cyan-100">
+            <p className="font-medium">{getWelcomeStatus(welcomeStatus)}</p>
+            {welcomeStatus.phase === "listening" ? (
+              <p className="mt-1 text-xs text-slate-400">
+                Say English, Urdu with Aarav, or Arabic with Omar.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
 
         {error ? (
           <p className="mt-4 rounded-2xl border border-red-300/20 bg-red-400/10 px-4 py-3 text-sm text-red-200">
@@ -165,7 +223,7 @@ function CallPanel() {
         </div>
       </div>
 
-      <RoomAudioRenderer />
+      <VoiceForceLatency />
     </section>
   );
 }
@@ -173,6 +231,7 @@ function CallPanel() {
 function getStatus(
   state: ReturnType<typeof useAgent>["state"],
   isStarting: boolean,
+  welcomeStatus: WelcomeStatus,
 ) {
   if (isStarting || state === "connecting") {
     return "Connecting to the receptionist…";
@@ -187,7 +246,9 @@ function getStatus(
   }
 
   if (state === "listening") {
-    return "Listening to you";
+    return welcomeStatus.phase === "listening"
+      ? "Listening for your language choice"
+      : "Listening to you";
   }
 
   if (state === "failed") {
@@ -199,6 +260,42 @@ function getStatus(
   }
 
   return "Preparing the receptionist…";
+}
+
+type WelcomeStatus = {
+  phase: "idle" | "introducing" | "listening" | "selected" | "failed";
+  language?: string | null;
+  label?: string;
+  activeAgent?: string;
+  errorType?: string;
+};
+
+function getWelcomeStatus(status: WelcomeStatus) {
+  if (status.phase === "introducing") {
+    return status.label
+      ? `Introducing ${status.label}`
+      : "Introducing language assistants";
+  }
+
+  if (status.phase === "listening") {
+    return "Choose your language";
+  }
+
+  if (status.phase === "selected") {
+    const language =
+      status.language === "ur"
+        ? "Urdu with Aarav"
+        : status.language === "ar"
+          ? "Arabic with Omar"
+          : "English";
+    return `${language} selected`;
+  }
+
+  if (status.phase === "failed") {
+    return "The language welcome sequence could not be completed";
+  }
+
+  return "Preparing language assistants";
 }
 
 function getStatusColor(state: ReturnType<typeof useAgent>["state"]) {

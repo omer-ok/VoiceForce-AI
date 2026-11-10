@@ -11,9 +11,17 @@ conversation transcripts.
 - Milestone 2 — Next.js browser-to-agent integration: completed and committed.
 - Milestone 3 — Historical property sales intelligence: initial implementation
   completed for one Kaggle CSV; semantic retrieval remains deferred.
+- Milestone 4 — AI property sales agent: backend implementation complete; live
+  voice smoke testing remains environment-dependent.
+- Multilingual voice routing: English, Urdu, and Arabic welcome selection is
+  implemented with per-session language persistence and runtime TTS switching.
+- Voice latency telemetry: backend per-turn metrics, isolated session reports,
+  browser media-element events, and controlled debugger scenarios are
+  implemented. The current measurements are engineering observations, not a
+  release acceptance benchmark.
 
-Property search, CRM tools, authentication, PostgreSQL, billing, live
-property feeds, and dashboards are planned work. They are not implemented.
+CRM tools, authentication, PostgreSQL, billing, live authoritative property
+feeds, appointment scheduling, and dashboards remain planned work.
 
 ## Architecture
 
@@ -31,10 +39,12 @@ The Python backend registers the same named agent with `AgentServer` and uses
 - LLM: OpenAI GPT-5 Mini.
 - TTS: Fish Audio S2.1 Pro.
 
-The receptionist now has three historical-data tools backed by DuckDB:
-`search_historical_sales`, `get_market_insights`, and `compare_areas`. It
-clearly labels their results as historical dataset records and cannot verify
-live property availability.
+The receptionist has three historical-data tools backed by DuckDB:
+`search_historical_sales`, `get_market_insights`, and `compare_areas`. It also
+has `search_demo_properties` for the 100-record synthetic AED inventory and
+`capture_customer_lead` for consent-gated demo enquiries. Historical results
+remain clearly labelled as historical dataset records, while demo results are
+clearly labelled as synthetic with simulated availability.
 
 Milestone 3 currently uses only `secondary_sales.csv` from the Kaggle dataset.
 The source documentation describes the records as generated for analysis, not
@@ -52,6 +62,26 @@ currency conversion is performed.
 - LiveKit Cloud, WebRTC rooms, and named agent dispatch.
 - Python 3.10–3.14, LiveKit Agents, `AgentServer`, and `AgentSession`.
 - LiveKit Inference for STT, LLM, and TTS.
+
+The STT is configured for AssemblyAI Universal-3.6 Pro multilingual detection.
+English continues to use Fish Audio S2.1 Pro. Urdu and Arabic responses use
+Inworld Realtime TTS-2 Flash through LiveKit Inference after the caller's STT
+language metadata identifies a supported language. The native-language Inworld
+voice IDs are deployment configuration, not hardcoded guesses.
+
+The active language routes are:
+
+| Language | STT language | TTS provider/model | Voice | Locale |
+| --- | --- | --- | --- | --- |
+| English | `en` | Fish Audio S2.1 Pro (`fishaudio/s2.1-pro`) | configured English voice | `en` |
+| Urdu | `ur` | Inworld Realtime TTS-2 Flash (`inworld/inworld-tts-2-flash`) | Aarav | `ur-PK` |
+| Arabic | `ar` | Inworld Realtime TTS-2 Flash (`inworld/inworld-tts-2-flash`) | Omar | `ar-SA` |
+
+The browser welcome flow introduces all three options and hands the same
+`AgentSession` to the selected receptionist. Urdu responses are requested as
+Urdu rather than Hindi, and Arabic/Urdu language state is preserved for the
+session while still allowing deliberate language switches.
+
 - Planned retrieval architecture: DuckDB, LlamaIndex, and Qdrant.
 
 Retrieval responsibilities are intentionally separated:
@@ -75,19 +105,35 @@ Retrieval responsibilities are intentionally separated:
 │   └── page.tsx                 # VoiceForce landing and call page
 ├── components/
 │   ├── voiceforce-call.tsx      # Session API call controls and transcripts
+│   ├── voiceforce-latency.tsx    # Browser media and LiveKit telemetry
 │   └── voiceforce-call-loader.tsx
 ├── backend/
 │   ├── src/agent.py             # Python CLI entrypoint
 │   ├── src/voiceforce_agent/
 │   │   ├── config.py            # LiveKit Inference configuration
-│   │   ├── receptionist.py      # Receptionist and historical-data tools
+│   │   ├── language_router.py    # Per-session language and TTS routing
+│   │   ├── latency_metrics.py    # Privacy-conscious backend telemetry
+│   │   ├── lead_storage.py      # Consent-gated demo lead persistence
+│   │   ├── property_search.py   # Parameterized synthetic inventory queries
+│   │   ├── receptionist.py      # Sales consultant and function tools
 │   │   ├── sales_data.py         # Dataset identity and schema constants
 │   │   ├── sales_ingestion.py    # Pandas validation and DuckDB ingestion
 │   │   ├── sales_queries.py      # Parameterized historical sales queries
-│   │   └── server.py             # AgentServer and AgentSession
+│   │   ├── server.py             # AgentServer and AgentSession
+│   │   ├── state.py              # Per-session structured preferences
+│   │   └── welcome.py            # Multilingual welcome and selection flow
 │   ├── tests/
 │   │   ├── test_configuration.py
+│   │   ├── test_language_router.py
+│   │   ├── test_latency_metrics.py
+│   │   ├── test_lead_storage.py
+│   │   ├── test_property_search.py
 │   │   └── test_sales_queries.py
+│   ├── scripts/
+│   │   ├── generate_demo_listings.py
+│   │   └── summarize_latency.py
+│   ├── scenarios/
+│   │   └── voice_latency_benchmark.yaml
 │   ├── data/                     # Generated DuckDB; ignored by Git
 │   ├── pyproject.toml
 │   └── uv.lock
@@ -95,6 +141,13 @@ Retrieval responsibilities are intentionally separated:
 ├── package.json
 └── tsconfig.json
 ```
+
+The complete telemetry semantics and benchmark workflow are documented in
+[`docs/latency-baseline.md`](docs/latency-baseline.md). Backend and browser
+telemetry use separate clock domains. A browser `HTMLAudioElement` `playing`
+event proves media-element playback started, but it is not an acoustic
+loopback measurement and does not prove that sound reached the caller's
+physical speaker.
 
 ## Prerequisites
 
@@ -115,6 +168,8 @@ LIVEKIT_URL
 LIVEKIT_API_KEY
 LIVEKIT_API_SECRET
 NEXT_PUBLIC_LIVEKIT_URL
+VOICEFORCE_INWORLD_URDU_VOICE
+VOICEFORCE_INWORLD_ARABIC_VOICE
 ```
 
 The Python backend and Next.js token route read the server-side LiveKit
@@ -132,11 +187,15 @@ uv sync
 python -m voiceforce_agent.sales_ingestion \
   --input /path/to/secondary_sales.csv \
   --database data/voiceforce.duckdb
+uv run python scripts/generate_demo_listings.py
 lk agent dev --deployment dev
 ```
 
 The backend registers the `voiceforce-receptionist` agent. The explicit `dev`
 deployment matches the local Next.js Session configuration.
+
+The generator creates or refreshes the local `demo_property_listings` table
+without replacing `secondary_sales` or `dataset_provenance`.
 
 ## Run the frontend
 
@@ -157,11 +216,81 @@ Open [http://localhost:3000](http://localhost:3000).
 4. Allow microphone access when prompted.
 5. Speak naturally in English. The receptionist should greet you, respond
    with audio, and display the conversation transcript.
-6. Click **End Call** to disconnect.
+6. To test Urdu or Arabic, set the corresponding Inworld voice variable in the
+   backend environment, restart the backend, and speak in the target language.
+   Select voices recorded or evaluated for the target language in the Inworld
+   TTS Playground; the application does not guess voice IDs.
+7. Ask to buy or rent, provide a community and budget, and request demo
+   property recommendations. Sale amounts are purchase prices in AED; rental
+   amounts are annual rent in AED.
+8. If you want an enquiry registered, explicitly consent, confirm your name and
+   phone number, and then let the agent save the demo enquiry.
+9. Click **End Call** to disconnect.
 
 The token route accepts the Session API's `room_config`, validates the agent
 name and deployment, and uses that validated configuration for LiveKit agent
 dispatch. There is no separate manual dispatch mechanism in the frontend.
+
+## Voice latency matrix
+
+The following is the latest fresh local audio-mode debugger measurement for the
+three selected language routes. It used one fresh session per route and two
+steady-state receptionist turns after the language-selection handoff. The
+sample is too small for release or production P95 claims.
+
+`P0` is shown as the minimum observed value and `P100` as the maximum. Values
+are seconds. The percentile implementation uses nearest-rank selection, so with
+`N=2`, P50 is the lower observation and P90/P95 are the upper observation.
+
+| Stage | English / Fish (`N=2`) | Urdu / Aarav (`N=2`) | Arabic / Omar (`N=2`) |
+| --- | ---: | ---: | ---: |
+| End-to-end (`e2e_latency`) | 3.154 / 3.154 / 3.568 / 3.568 / 3.568 | 2.960 / 2.960 / 4.500 / 4.500 / 4.500 | 2.620 / 2.620 / 3.031 / 3.031 / 3.031 |
+| End-of-turn (`end_of_turn_delay`) | 0.784 / 0.784 / 0.927 / 0.927 / 0.927 | 0.820 / 0.820 / 2.501 / 2.501 / 2.501 | 0.693 / 0.693 / 0.785 / 0.785 / 0.785 |
+| Transcription (`transcription_delay`) | 0.772 / 0.772 / 0.915 / 0.915 / 0.915 | 0.806 / 0.806 / 0.948 / 0.948 / 0.948 | 0.679 / 0.679 / 0.770 / 0.770 / 0.770 |
+| LLM TTFT (`llm_node_ttft`) | 1.659 / 1.659 / 1.938 / 1.938 / 1.938 | 1.538 / 1.538 / 3.101 / 3.101 / 3.101 | 1.341 / 1.341 / 1.861 / 1.861 / 1.861 |
+| LLM TTFS (`llm_node_ttfs`) | 1.835 / 1.835 / 2.108 / 2.108 / 2.108 | 1.666 / 1.666 / 3.351 / 3.351 / 3.351 | 1.511 / 1.511 / 2.044 / 2.044 / 2.044 |
+| TTS TTFB (`tts_node_ttfb`) | 0.543 / 0.543 / 0.545 / 0.545 / 0.545 | 0.341 / 0.341 / 0.344 / 0.344 / 0.344 | 0.306 / 0.306 / 0.336 / 0.336 / 0.336 |
+
+Column order is `P0 / P50 / P90 / P95 / P100`. The fresh debugger session
+identifiers were `mock-job-fa8395c2def8` (English), `mock-job-4f6eb5f0a2a1`
+(Urdu), and `mock-job-33b92203f3f3` (Arabic). These records were filtered by
+session and were not mixed with historical JSONL records.
+
+The separate cold/session-start observations were:
+
+| Cold sequence | English | Urdu | Arabic |
+| --- | ---: | ---: | ---: |
+| Six-segment welcome sequence (`N=1`) | 43.930s | 41.582s | 44.360s |
+| Language-selection handoff E2E (`N=1`) | 10.379s | 7.234s | 6.325s |
+
+These cold values are not normal conversational-turn measurements. No property
+search tool or database query was executed in this three-route sample, so it
+does not provide a database or property-search latency result. Backend
+`playback_latency` was recorded separately, but it must not be interpreted as
+browser audible playback.
+
+The current evidence points to the LLM as the largest steady-state latency
+component. Inworld TTS TTFB was lower than the English Fish Audio TTFB in this
+sample, while Urdu's second turn contained a synthetic-input STT anomaly and
+should not be treated as a clean language-quality comparison. Larger controlled
+runs are required before changing providers or turn-taking settings.
+
+To reproduce an isolated report without mixing historical records:
+
+```bash
+cd backend
+uv run python scripts/summarize_latency.py \
+  --input data/latency_metrics.jsonl \
+  --session-id <livekit-job-id> \
+  --diagnostic
+```
+
+The controlled scenarios are defined in
+[`backend/scenarios/voice_latency_benchmark.yaml`](backend/scenarios/voice_latency_benchmark.yaml).
+They cover greeting/clarification, one-tool property search, no results,
+rental-to-sale correction, clearing a budget, and a longer multi-result
+response. Each benchmark should record sample counts, cold/warm status, audio
+mode, language, and noise condition.
 
 ## Milestone 3 scope and roadmap
 
@@ -185,4 +314,19 @@ The following remain explicitly deferred: other Kaggle CSV files, Dubai Land
 Department integration, external datasets, Qdrant deployment, LlamaIndex
 indexing, embeddings, advanced hybrid search, PostgreSQL, authentication, CRM,
 and billing. DuckDB remains responsible for exact numerical historical
-analytics; Qdrant and LlamaIndex are future semantic-retrieval components.
+analytics and the synthetic demo inventory lookup; Qdrant and LlamaIndex are
+future semantic-retrieval components.
+
+## Milestone 4 demo sales scope
+
+The current sales consultant uses only the local `demo_property_listings`
+table. It supports buy-versus-rent intent, community, property type, bedroom
+and bathroom count, AED budget, furnishing, and result selection. The actual
+demo schema has no ready/off-plan field, so that preference is recorded but not
+used as a filter.
+
+All 100 records are synthetic and illustrative. Simulated availability is not
+verified live inventory, and no result should be represented as a genuine
+listing or current offer. Lead capture writes to a separate `demo_leads` table
+only after explicit customer consent and confirmation of the name and phone
+number.
