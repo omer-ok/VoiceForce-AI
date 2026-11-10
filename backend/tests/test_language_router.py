@@ -226,7 +226,8 @@ def test_missing_language_metadata_preserves_established_route(monkeypatch) -> N
     assert len(agent.updates) == 1
 
 
-def test_language_switches_english_urdu_arabic_urdu(monkeypatch) -> None:
+def test_language_switches_english_urdu_arabic_english(monkeypatch) -> None:
+    monkeypatch.setenv("VOICEFORCE_INWORLD_ENGLISH_VOICE", "Simon")
     monkeypatch.setenv("VOICEFORCE_INWORLD_URDU_VOICE", "Aarav")
     monkeypatch.setenv("VOICEFORCE_INWORLD_ARABIC_VOICE", "Omar")
     monkeypatch.setattr(
@@ -239,7 +240,7 @@ def test_language_switches_english_urdu_arabic_urdu(monkeypatch) -> None:
     english = fake_tts_for_language("en")
     router = MultilingualTTSRouter(agent, session, english_tts=english)
 
-    for language in ("en", "ur", "ar", "ur"):
+    for language in ("en", "ur", "ar", "en"):
         router.on_user_input_transcribed(
             SimpleNamespace(
                 language=language, is_final=True, item_id=f"turn-{language}"
@@ -249,11 +250,11 @@ def test_language_switches_english_urdu_arabic_urdu(monkeypatch) -> None:
     assert [tts._opts.language for tts in agent.updates] == [
         "ur-PK",
         "ar-SA",
-        "ur-PK",
+        "en",
     ]
-    assert agent.updates[0] is agent.updates[-1]
+    assert agent.updates[-1] is english
     assert agent.updates[1]._opts.voice == "Omar"
-    assert router.active_language == "ur"
+    assert router.active_language == "en"
 
 
 def test_hindi_alias_preserves_detected_language_separately_from_voice_route(

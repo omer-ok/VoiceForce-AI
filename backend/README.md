@@ -16,11 +16,21 @@ or expose these values to the browser.
 
 AssemblyAI Universal-3.6 Pro is configured for English, Urdu, Arabic, and
 supported code-switching through provider language detection. English keeps the
-existing Fish Audio TTS. Urdu and Arabic use Inworld Realtime TTS-2 Flash. Set
-`VOICEFORCE_INWORLD_URDU_VOICE` and
-`VOICEFORCE_INWORLD_ARABIC_VOICE` to native-language voice IDs selected from
-the Inworld TTS catalog/playground. These are not LiveKit or Inworld API keys;
-LiveKit Inference uses the existing LiveKit Cloud credentials.
+Inworld Realtime TTS-2 Flash through LiveKit Inference is used for all three
+response languages. Configure the validated English system voice Simon and the
+selected Urdu and Arabic voices with:
+
+```text
+VOICEFORCE_INWORLD_MODEL=inworld/inworld-tts-2-flash
+VOICEFORCE_INWORLD_ENGLISH_VOICE=Simon
+VOICEFORCE_INWORLD_URDU_VOICE=Aarav
+VOICEFORCE_INWORLD_ARABIC_VOICE=Omar
+```
+
+The application forwards `en`, `ur-PK`, and `ar-SA` as the TTS language values.
+These are voice IDs, not LiveKit or Inworld API keys; LiveKit Inference uses the
+existing LiveKit Cloud credentials. Do not replace the qualified model ID with
+the unqualified direct-Inworld-plugin identifier.
 
 ## Install
 

@@ -1,8 +1,10 @@
 # VoiceForce AI latency baseline
 
-This document describes the Phase 1 measurement-only baseline. It does not
-change the AssemblyAI, GPT-5 Mini, Fish Audio, VAD, turn detection, endpointing,
-WebRTC, or Session API configuration.
+This document describes the measurement-only latency baseline and telemetry
+contract. It does not change AssemblyAI, GPT-5 Mini, VAD, turn detection,
+endpointing, WebRTC, or Session API configuration. TTS provider changes are
+reported as separate benchmark conditions; the current production route uses
+Inworld Realtime TTS-2 Flash for English, Urdu, and Arabic.
 
 ## What is measured
 

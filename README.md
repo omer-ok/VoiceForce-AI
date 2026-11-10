@@ -37,7 +37,7 @@ The Python backend registers the same named agent with `AgentServer` and uses
 
 - STT: AssemblyAI Universal-3-6-Pro.
 - LLM: OpenAI GPT-5 Mini.
-- TTS: Fish Audio S2.1 Pro.
+- TTS: Inworld Realtime TTS-2 Flash through LiveKit Inference.
 
 The receptionist has three historical-data tools backed by DuckDB:
 `search_historical_sales`, `get_market_insights`, and `compare_areas`. It also
@@ -64,16 +64,15 @@ currency conversion is performed.
 - LiveKit Inference for STT, LLM, and TTS.
 
 The STT is configured for AssemblyAI Universal-3.6 Pro multilingual detection.
-English continues to use Fish Audio S2.1 Pro. Urdu and Arabic responses use
-Inworld Realtime TTS-2 Flash through LiveKit Inference after the caller's STT
-language metadata identifies a supported language. The native-language Inworld
-voice IDs are deployment configuration, not hardcoded guesses.
+All three response languages use Inworld Realtime TTS-2 Flash through LiveKit
+Inference after the caller's STT language metadata identifies a supported
+language. The voice IDs are deployment configuration, not hardcoded guesses.
 
 The active language routes are:
 
 | Language | STT language | TTS provider/model | Voice | Locale |
 | --- | --- | --- | --- | --- |
-| English | `en` | Fish Audio S2.1 Pro (`fishaudio/s2.1-pro`) | configured English voice | `en` |
+| English | `en` | Inworld Realtime TTS-2 Flash (`inworld/inworld-tts-2-flash`) | Simon | `en` (catalog: `en-US`) |
 | Urdu | `ur` | Inworld Realtime TTS-2 Flash (`inworld/inworld-tts-2-flash`) | Aarav | `ur-PK` |
 | Arabic | `ar` | Inworld Realtime TTS-2 Flash (`inworld/inworld-tts-2-flash`) | Omar | `ar-SA` |
 
@@ -168,6 +167,8 @@ LIVEKIT_URL
 LIVEKIT_API_KEY
 LIVEKIT_API_SECRET
 NEXT_PUBLIC_LIVEKIT_URL
+VOICEFORCE_INWORLD_MODEL
+VOICEFORCE_INWORLD_ENGLISH_VOICE
 VOICEFORCE_INWORLD_URDU_VOICE
 VOICEFORCE_INWORLD_ARABIC_VOICE
 ```
@@ -242,7 +243,7 @@ sample is too small for release or production P95 claims.
 are seconds. The percentile implementation uses nearest-rank selection, so with
 `N=2`, P50 is the lower observation and P90/P95 are the upper observation.
 
-| Stage | English / Fish (`N=2`) | Urdu / Aarav (`N=2`) | Arabic / Omar (`N=2`) |
+| Stage | English / Fish baseline (`N=2`) | Urdu / Aarav (`N=2`) | Arabic / Omar (`N=2`) |
 | --- | ---: | ---: | ---: |
 | End-to-end (`e2e_latency`) | 3.154 / 3.154 / 3.568 / 3.568 / 3.568 | 2.960 / 2.960 / 4.500 / 4.500 / 4.500 | 2.620 / 2.620 / 3.031 / 3.031 / 3.031 |
 | End-of-turn (`end_of_turn_delay`) | 0.784 / 0.784 / 0.927 / 0.927 / 0.927 | 0.820 / 0.820 / 2.501 / 2.501 / 2.501 | 0.693 / 0.693 / 0.785 / 0.785 / 0.785 |
@@ -269,11 +270,28 @@ does not provide a database or property-search latency result. Backend
 `playback_latency` was recorded separately, but it must not be interpreted as
 browser audible playback.
 
+The post-migration English Simon smoke measurement used the same spoken
+sentence, `I need help finding a property.`, in a fresh audio debugger session.
+It is one normal receptionist turn (`N=1`) and is therefore directional only:
+
+| Metric | Fish baseline P50 (`N=2`) | Inworld Simon (`N=1`) | Observed change |
+| --- | ---: | ---: | ---: |
+| End-to-end | 3.154s | 2.473s | -0.681s |
+| LLM TTFT | 1.659s | 1.357s | -0.302s |
+| TTS TTFB | 0.543s | 0.327s | -0.216s |
+
+This is not a provider-quality conclusion: the Fish values have two normal
+turns while Simon has one, and browser playback was not measured. The Simon
+session did emit audio through the configured LiveKit route, with backend logs
+confirming `inworld/inworld-tts-2-flash`, voice `Simon`, and locale `en`.
+
 The current evidence points to the LLM as the largest steady-state latency
-component. Inworld TTS TTFB was lower than the English Fish Audio TTFB in this
-sample, while Urdu's second turn contained a synthetic-input STT anomaly and
+component. The English values in this table are the old Fish Audio baseline;
+the post-migration Simon comparison is shown above from a fresh session with
+the new route. Urdu's second turn contained a synthetic-input STT anomaly and
 should not be treated as a clean language-quality comparison. Larger controlled
-runs are required before changing providers or turn-taking settings.
+runs are required before drawing a provider-quality conclusion or changing
+turn-taking settings.
 
 To reproduce an isolated report without mixing historical records:
 

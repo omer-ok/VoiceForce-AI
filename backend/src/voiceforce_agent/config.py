@@ -22,11 +22,14 @@ DETECTED_LANGUAGE_BASES: frozenset[str] = frozenset(
     {ENGLISH_LANGUAGE, URDU_LANGUAGE, "hi", ARABIC_LANGUAGE}
 )
 
-ENGLISH_TTS_MODEL = "fishaudio/s2.1-pro"
-ENGLISH_TTS_VOICE = "bf322df2096a46f18c579d0baa36f41d"
-INWORLD_TTS_MODEL = "inworld/inworld-tts-2-flash"
-# This is the LiveKit Inference model ID.  The direct Inworld plugin uses a
+DEFAULT_INWORLD_TTS_MODEL = "inworld/inworld-tts-2-flash"
+# This is the LiveKit Inference model ID. The direct Inworld plugin uses a
 # different, unqualified identifier and must not be mixed into this path.
+INWORLD_TTS_MODEL_ENV = "VOICEFORCE_INWORLD_MODEL"
+ENGLISH_TTS_VOICE_ENV = "VOICEFORCE_INWORLD_ENGLISH_VOICE"
+URDU_TTS_VOICE_ENV = "VOICEFORCE_INWORLD_URDU_VOICE"
+ARABIC_TTS_VOICE_ENV = "VOICEFORCE_INWORLD_ARABIC_VOICE"
+ENGLISH_TTS_LOCALE = "en"
 URDU_TTS_LOCALE = "ur-PK"
 ARABIC_TTS_LOCALE = "ar-SA"
 
@@ -37,7 +40,7 @@ class VoiceRoute:
 
     detected_language: str
     effective_language: SupportedLanguage
-    provider: Literal["fishaudio", "inworld"]
+    provider: Literal["inworld"]
     model: str
     voice: str
     locale: str
@@ -52,6 +55,8 @@ def validate_environment() -> None:
     if missing:
         names = ", ".join(missing)
         raise RuntimeError(f"Missing required LiveKit environment variables: {names}")
+
+    _configured_inworld_model()
 
 
 def build_stt() -> inference.STT:
@@ -87,13 +92,33 @@ def build_llm() -> inference.LLM:
 
 
 def build_tts() -> inference.TTS:
-    """Build the Fish Audio S2.1 Pro English TTS service."""
+    """Build the configured English Inworld TTS service."""
 
-    return inference.TTS(
-        model=ENGLISH_TTS_MODEL,
-        voice=ENGLISH_TTS_VOICE,
-        language="en",
-    )
+    return build_tts_for_language(ENGLISH_LANGUAGE)
+
+
+def _configured_inworld_model() -> str:
+    """Return the qualified LiveKit Inference Inworld model identifier."""
+
+    model = os.getenv(INWORLD_TTS_MODEL_ENV, DEFAULT_INWORLD_TTS_MODEL).strip()
+    if model != DEFAULT_INWORLD_TTS_MODEL:
+        raise RuntimeError(
+            f"{INWORLD_TTS_MODEL_ENV} must be set to "
+            f"{DEFAULT_INWORLD_TTS_MODEL!r} for LiveKit Inference; direct "
+            "Inworld plugin model identifiers are not supported"
+        )
+    return model
+
+
+def _configured_voice(language: SupportedLanguage) -> tuple[str, str]:
+    if language == ENGLISH_LANGUAGE:
+        return (
+            ENGLISH_TTS_VOICE_ENV,
+            os.getenv(ENGLISH_TTS_VOICE_ENV, "").strip(),
+        )
+    if language == URDU_LANGUAGE:
+        return URDU_TTS_VOICE_ENV, os.getenv(URDU_TTS_VOICE_ENV, "").strip()
+    return ARABIC_TTS_VOICE_ENV, os.getenv(ARABIC_TTS_VOICE_ENV, "").strip()
 
 
 def normalize_detected_language_code(language: object) -> str | None:
@@ -147,10 +172,10 @@ def resolve_voice_route(language: object) -> VoiceRoute | None:
         return VoiceRoute(
             detected_language=detected_tag,
             effective_language="en",
-            provider="fishaudio",
-            model=ENGLISH_TTS_MODEL,
-            voice=ENGLISH_TTS_VOICE,
-            locale="en",
+            provider="inworld",
+            model=_configured_inworld_model(),
+            voice=os.getenv(ENGLISH_TTS_VOICE_ENV, "").strip(),
+            locale=ENGLISH_TTS_LOCALE,
             alias_applied=False,
         )
 
@@ -159,8 +184,8 @@ def resolve_voice_route(language: object) -> VoiceRoute | None:
             detected_language=detected_tag,
             effective_language="ur",
             provider="inworld",
-            model=INWORLD_TTS_MODEL,
-            voice=os.getenv("VOICEFORCE_INWORLD_URDU_VOICE", "").strip(),
+            model=_configured_inworld_model(),
+            voice=os.getenv(URDU_TTS_VOICE_ENV, "").strip(),
             locale=URDU_TTS_LOCALE,
             alias_applied=detected_language == "hi",
         )
@@ -169,8 +194,8 @@ def resolve_voice_route(language: object) -> VoiceRoute | None:
         detected_language=detected_tag,
         effective_language="ar",
         provider="inworld",
-        model=INWORLD_TTS_MODEL,
-        voice=os.getenv("VOICEFORCE_INWORLD_ARABIC_VOICE", "").strip(),
+        model=_configured_inworld_model(),
+        voice=os.getenv(ARABIC_TTS_VOICE_ENV, "").strip(),
         locale=ARABIC_TTS_LOCALE,
         alias_applied=False,
     )
@@ -179,10 +204,10 @@ def resolve_voice_route(language: object) -> VoiceRoute | None:
 def build_tts_for_language(language: SupportedLanguage) -> inference.TTS:
     """Build the configured TTS for one supported response language.
 
-    English intentionally remains on the existing Fish Audio configuration.
-    Inworld voice IDs are deployment configuration because the available
-    native-language voices must be selected and evaluated in the Inworld
-    catalog rather than guessed in application code.
+    All supported languages use LiveKit Inference with the shared Inworld
+    TTS-2 Flash model. Voice IDs remain deployment configuration because they
+    must be selected and evaluated in the Inworld catalog rather than guessed
+    in application code.
     """
 
     if language not in SUPPORTED_LANGUAGES:
@@ -191,15 +216,8 @@ def build_tts_for_language(language: SupportedLanguage) -> inference.TTS:
     route = resolve_voice_route(language)
     if route is None or route.effective_language != language:
         raise ValueError(f"unsupported TTS language: {language!r}")
-    if language == ENGLISH_LANGUAGE:
-        return build_tts()
-
-    if not route.voice:
-        voice_variable = (
-            "VOICEFORCE_INWORLD_URDU_VOICE"
-            if language == URDU_LANGUAGE
-            else "VOICEFORCE_INWORLD_ARABIC_VOICE"
-        )
+    voice_variable, voice = _configured_voice(language)
+    if not voice:
         raise RuntimeError(
             f"{voice_variable} must contain an Inworld voice ID before "
             f"{language} speech can be enabled"
@@ -207,6 +225,6 @@ def build_tts_for_language(language: SupportedLanguage) -> inference.TTS:
 
     return inference.TTS(
         model=route.model,
-        voice=route.voice,
+        voice=voice,
         language=route.locale,
     )
