@@ -1203,3 +1203,204 @@ Retain qualifying friction even if it is later fixed or worked around; record th
 Before the final response, run one reporting pass. If candidates remain, from this file's directory run `npx --no-install next internal agent-feedback-instructions` once without piping or truncating its output. Follow its output or error guidance. If a network sandbox blocks it, retry with network access; if it still returns no output, continue normally.
 
 <!-- END:nextjs-agent-feedback -->
+
+# 15. Active Work Order — English Voice Pipeline Latency Optimization
+
+This section is the active implementation brief and supersedes conflicting initial-provider choices in earlier sections for this milestone only. The task is to inspect and modify the existing application, not to produce a read-only proposal.
+
+## 15.1 Objective and scope
+
+Reduce the time from caller end-of-turn to the first useful spoken sentence. The two primary optimization metrics are:
+
+- `llm_node_ttft`: time to first LLM token.
+- `llm_node_ttfs`: time to first sentence from the LLM.
+
+The latest isolated browser run supplied by the owner is a diagnostic baseline (small sample; not a production percentile):
+
+| Metric | P50 | P95 |
+| --- | ---: | ---: |
+| End-to-end latency | 3.605 s | 5.594 s |
+| End-of-turn delay | 0.647 s | 1.111 s |
+| Transcription delay | 0.635 s | 1.090 s |
+| LLM TTFT | 2.018 s | 3.988 s |
+| LLM TTFS | 2.711 s | 4.176 s |
+| TTS TTFB | 0.311 s | 0.334 s |
+| Tool duration | 0.231 s | 0.380 s |
+
+Treat these as owner-provided observations from a mixed-language run, not a clean English-only benchmark. Establish a fresh English-only baseline before claiming improvements. Do not add overlapping stage durations to calculate E2E.
+
+The current intended English stack for this workstream is:
+
+- STT: AssemblyAI Universal-3.6 Pro through LiveKit Inference; keep unchanged.
+- LLM: replace the hard-coded GPT-5 Mini default with a configurable, benchmark-selected low-latency LiveKit Inference model.
+- TTS during this optimization: Fish Audio S2.1 Pro through LiveKit Inference (`fishaudio/s2.1-pro`), after verifying current SDK/model/voice support.
+- Runtime: Python LiveKit Agents, AgentSession, AgentServer, existing LiveKit Cloud/WebRTC and Next.js browser integration.
+
+The owner reports an Inworld TTS-2 Flash concurrency limitation of five concurrent connections, after which synthesis may stop. Therefore do not use Inworld TTS-2 Flash as the default production/test TTS for concurrency tests above five simultaneous connections. Use Fish Audio S2.1 Pro for the current English path. Once the LLM bottleneck is demonstrably improved, run a separate controlled TTS evaluation of Inworld TTS-2 and Inworld TTS-2 Flash, respecting provider limits and verifying current availability. Do not conflate TTS work with the primary LLM optimization.
+
+This is an English-first latency milestone. Preserve the existing Urdu/Arabic language-router code and voice configuration unless a change is strictly required for correctness. Do not spend time benchmarking Urdu or Arabic in this milestone, do not claim those routes were validated, and do not silently route them to an English voice. Document any remaining Inworld concurrency exposure on those frozen routes.
+
+## 15.2 Mandatory repository audit before edits
+
+Inspect the actual working tree, not just this instruction file:
+
+- Run `git status --short` and preserve all user changes.
+- Read the root `AGENTS.md`, backend package/dependency files and lockfile.
+- Inspect `backend/src/voiceforce_agent/config.py`, `server.py`, `receptionist.py`, `language_router.py`, `latency_metrics.py`, welcome/agent handoff code, tool/database services, tests, and benchmark scripts.
+- Inspect the current frontend/browser latency instrumentation and `docs/latency-baseline.md`.
+- Trace the actual path from final user transcript -> LLM stream -> sentence segmentation -> TTS stream -> LiveKit audio frames.
+- Identify any full-response buffering, blocking calls on the event loop, unnecessary sequential calls, repeated prompt/context construction, excessive tool schemas, or extra model round trips.
+- Do not assume an earlier implementation description is still accurate.
+
+Known observations from the repository review at the time this section was written (verify against the current checkout):
+- `config.py` hard-codes `openai/gpt-5-mini` with `reasoning_effort=low`.
+- `server.py` constructs one `AgentSession`, uses AssemblyAI, attaches the latency listeners, and enables preemptive generation with `{"enabled": True}`.
+- `receptionist.py` already overrides `tts_node` as an async generator and forwards audio frames with `async for` / `yield`.
+- Its synchronous DuckDB/storage operations are already moved off the event loop using `asyncio.to_thread` in tool wrappers. Audit all paths before changing them; do not replace working thread offloads with blocking calls.
+- The default LiveKit LLM node is not overridden in the inspected implementation. Prefer the framework's native streaming node unless a measured, justified customization is needed.
+- Existing latency instrumentation records LLM TTFT, TTFS, tokens/sec, TTS TTFB and E2E metrics. Extend it only where a real missing timestamp prevents diagnosis; do not duplicate or redefine existing metrics.
+
+## 15.3 LiveKit Docs MCP and Agent Skills are mandatory
+
+Use Codex's LiveKit Docs MCP server and installed LiveKit Agent Skills before and during implementation. Do not rely on model memory for a fast-changing SDK.
+
+1. Check the configured MCP server and confirm it can search and fetch current LiveKit documentation. If absent, tell the owner and install/configure it using the official Codex command:
+   `codex mcp add --url https://docs.livekit.io/mcp livekit-docs`
+2. Check the installed LiveKit Agent Skill. If absent, install the official skill using:
+   `npx skills add livekit/agent-skills --skill livekit-agents`
+3. If using the LiveKit CLI skill workflow, inspect `lk --version`, then use `lk skills install` / `lk skills update` as appropriate. Do not overwrite local skill customizations without reviewing the diff.
+4. Use the MCP to search and fetch the complete current documentation for: AgentSession, Agent/Agent.default.llm_node, streaming LLM and TTS nodes, LiveKit Inference LLM model catalogue and parameters, Fish Audio S2.1 Pro, Inworld TTS-2, turn handling, preemptive generation, async function tools, cancellation, observability and testing.
+5. Read the installed skill's relevant guidance for building, debugging, operating and testing agents. Follow its workflow and use the LiveKit agent debugger/simulations when supported.
+6. Record the exact documentation pages/API signatures and SDK version used in the implementation summary.
+
+Official references to start with (fetch current pages through MCP rather than treating these links as frozen API contracts):
+- https://docs.livekit.io/mcp
+- https://docs.livekit.io/agents/logic/sessions/
+- https://docs.livekit.io/agents/logic/turns/tuning/
+- https://docs.livekit.io/agents/models/llm/
+- https://docs.livekit.io/agents/models/tts/fishaudio/
+- https://docs.livekit.io/reference/python/livekit/agents/
+
+## 15.4 LLM model upgrade and configuration
+
+Do not blindly select a model because it is newer, larger, or advertised as fast. Use LiveKit's current Inference catalogue via MCP and verify each model is available to this LiveKit project, supports streaming, and supports the required function/tool calling.
+
+At minimum, evaluate:
+- Existing baseline: `openai/gpt-5-mini`.
+- LiveKit's currently documented recommended voice-agent model: `google/gemma-4-31b-it`.
+- One or more currently available low-latency alternatives from the official catalogue, selected from current documentation (for example a current Flash model or GPT-5.4 Mini if still listed and available).
+
+The examples above are candidates, not an instruction to assume availability or performance. Verify model IDs, retirement/deprecation status, model parameters and tool-call support using the MCP documentation and actual LiveKit Inference response. Do not invent model IDs or pass unsupported reasoning parameters.
+
+Implementation requirements:
+- Make the selected LLM model configurable through a server-only environment variable such as `VOICEFORCE_LLM_MODEL`.
+- Keep a documented safe fallback/rollback to the current GPT-5 Mini model.
+- Keep model-specific parameters in a small explicit configuration layer. Apply reasoning/verbosity controls only when the selected model documents and accepts them.
+- Avoid initializing multiple production LLMs per call. Benchmark candidates in isolated runs/configurations.
+- Keep tool schemas and agent instructions concise, but preserve every business rule, safety rule, tool permission and grounding constraint.
+- Inspect actual prompt token counts and conversation-history growth. Do not truncate required context or silently remove relevant history.
+- Ensure tool calls remain supported and correctly handled. Measure tool-call selection and argument accuracy, not latency alone.
+- Do not add a second LLM call for language detection, classification, rewriting or response polishing unless the task proves it is necessary.
+- Do not move to Ollama/Llama 3.2 in this milestone unless the owner explicitly changes scope. This workstream is focused on LiveKit Inference model selection and orchestration.
+
+Choose the default model only after a controlled benchmark. Report the winning model and why; leave the previous model available for rollback.
+
+## 15.5 Async programming, streaming, yield and cancellation
+
+Use LiveKit's native async streaming APIs and generator contract.
+
+- Preserve the async generator pipeline. Consume streams with `async for` and forward chunks/frames with `yield` as soon as safely available.
+- Do not call `collect()`, accumulate the complete LLM response, or wait for the full answer before passing eligible text to the TTS node in the live voice-response path.
+- Do not add a custom `llm_node` override merely for style. The default LiveKit LLM node already streams chunks. If an override is necessary for instrumentation or a required transformation, delegate to the documented default implementation and forward each chunk immediately using `async for` and `yield`; preserve tool-call chunks, usage metadata, flush sentinels and cancellation semantics.
+- Keep sentence/phrase segmentation streaming-aware. Do not add arbitrary large buffers or wait for a paragraph. Measure the gap between first token, first complete sentence (TTFS), first text forwarded to TTS, TTS first audio byte and first published audio frame wherever the installed SDK exposes reliable events.
+- Preserve the existing async `tts_node` frame-forwarding behavior. Verify whether the selected Fish Audio Inference TTS exposes native streaming capability. Let LiveKit's supported adapter/tokenizer handle non-streaming providers rather than building a second buffering layer.
+- Do not call synchronous network clients, file operations, DuckDB queries, Pandas operations or other blocking I/O directly on the event loop. Reuse the existing `asyncio.to_thread` wrappers for synchronous database operations; use native async clients for async-capable network I/O.
+- Use `asyncio.gather` or TaskGroup only for independent operations whose results are all required. Do not parallelize dependent operations, duplicate database work, or create speculative tools that add load.
+- Add explicit timeouts and meaningful error handling to external I/O. Ensure cancellation propagates when a caller interrupts, the turn is superseded, or the session ends. Do not swallow `CancelledError` or leave orphan tasks.
+- Do not assume `asyncio.to_thread` stops the underlying synchronous operation on cancellation. Keep operations bounded and safe.
+- Do not create untracked background tasks for work required to answer the current turn.
+- Do not add unnecessary locks or serialize independent sessions globally.
+
+## 15.6 LiveKit turn handling and preemptive generation
+
+Audit the installed SDK's exact API before changing options.
+
+- Preserve preemptive LLM generation if current behavior and tests confirm it is enabled and working.
+- Verify whether preemptive TTS is supported by the installed SDK/provider combination. Test it as a separate condition; it can waste TTS work when the caller continues speaking.
+- Do not assume a setting is enabled merely because it is enabled by default in the latest docs. Inspect the installed version and effective session configuration.
+- Do not aggressively reduce endpointing delays to mask slow LLM TTFT. Tune EOU separately with short acknowledgements, natural pauses, long utterances, noisy audio and interruption tests.
+- Preserve barge-in: cancel obsolete LLM/TTS generation and stop stale audio promptly. Prevent duplicate or late responses after a caller correction.
+- Do not change STT model/configuration in this milestone except for a separately justified bug fix. Keep AssemblyAI Universal-3.6 Pro as the baseline.
+
+## 15.7 TTS provider and concurrency policy
+
+For the English optimization path:
+- Configure LiveKit Inference Fish Audio S2.1 Pro using the verified model ID `fishaudio/s2.1-pro`.
+- Verify the current voice parameter, streaming capability, supported English locale and model options via MCP.
+- Use an environment variable for the Fish Audio voice ID. Do not invent a voice ID or silently reuse an Inworld voice ID. If no valid Fish Audio voice is configured, fail clearly with setup instructions or use only a documented provider default if the current LiveKit docs explicitly support one.
+- Keep Fish Audio parameters conservative initially; do not add expressive markup, transforms or speed changes until a baseline is captured.
+- Do not use Inworld TTS-2 Flash for concurrency tests exceeding the owner-reported five-connection limit.
+- After LLM TTFT/TTFS has been optimized and a fresh baseline is captured, benchmark `inworld/inworld-tts-2` and `inworld/inworld-tts-2-flash` separately against Fish Audio, within documented quotas. Compare TTFB, first audible audio, naturalness, intelligibility, pronunciation and stability.
+- Do not change Urdu/Arabic provider routing or claim multilingual support has been revalidated in this English milestone.
+
+## 15.8 Prompt, tools and context optimization
+
+- Measure actual prompt token counts for the same scenarios before and after each change.
+- Remove duplicated instructions, irrelevant tool schemas and repeated static context only when semantics are preserved.
+- Keep concise spoken-response rules (one or two natural sentences when appropriate) without sacrificing necessary clarifications or factual grounding.
+- Keep historical sales, synthetic demo inventory and lead-consent constraints intact.
+- Do not include irrelevant database schema or full result sets in every prompt. Retrieve only relevant data through the existing approved tools.
+- Do not bypass Qdrant/DuckDB architecture rules, invent live property availability, or allow arbitrary LLM-generated SQL.
+- Preserve privacy: no raw transcript text or PII in latency logs.
+
+## 15.9 Tests and benchmark acceptance
+
+Before changes, save a fresh English-only baseline with the existing code. Keep the same audio, prompts, tools, browser, region, warm/cold state and concurrency for every comparison.
+
+Use the existing telemetry and scripts. Report sample count and P50/P90/P95/max for:
+- LLM TTFT, TTFS and tokens/second.
+- TTS TTFB.
+- EOU and transcription delay.
+- End-to-end latency from the existing authoritative metric.
+- Tool duration and database duration.
+- Prompt tokens, selected model, TTS model and provider request IDs where safely available.
+
+Minimum initial comparison: 30 measured English turns per model/configuration; target 100+ turns before making a production P95 claim. Separate greeting/cold start from steady-state turns. Do not mix Urdu/Arabic samples into the English benchmark. Do not infer percentiles from fewer observations than were collected.
+
+Run:
+- Unit tests for configuration, model selection, tool wrappers and TTS routing.
+- Static checks/formatting used by the repository.
+- LiveKit agent debugger or existing scenario runner.
+- Browser end-to-end voice tests with real audio.
+- Tool-call scenarios, multi-turn context, short acknowledgements, long pauses, caller interruption, cancellation, and noisy microphone conditions.
+- A concurrency test for the selected TTS provider within its documented/owner-supplied limits.
+
+Acceptance:
+- Demonstrated improvement in English LLM TTFT and TTFS versus the fresh GPT-5 Mini baseline.
+- No regression in tool-call correctness, factual grounding, customer consent or property-data integrity.
+- No full-response buffering in the critical response path.
+- No blocking I/O on the event loop in the audited hot path.
+- No duplicate/stale speech after interruption.
+- Existing browser-to-agent integration continues to work.
+- TTS provider and concurrency limitations are explicit.
+- All results include sample counts and test conditions; no unmeasured performance claims.
+
+Suggested goals (targets only, not promises): LLM TTFT P50 < 500 ms, TTFS P50 < 700 ms, and end-of-turn-to-first-audio P50 < 1.5 s. Report actual results even if these targets are not reached.
+
+## 15.10 Implementation workflow and deliverables
+
+Implement this workstream directly after completing the audit; do not stop after writing a proposal unless a required credential, voice ID, MCP installation or destructive decision blocks progress.
+
+1. Report a concise audit of the current hot path and Git status.
+2. Capture the fresh English baseline.
+3. Implement configurable LLM model selection and benchmark candidates.
+4. Select the best measured model; retain rollback configuration.
+5. Verify/implement native async streaming and yield behavior end to end.
+6. Audit tool concurrency, blocking I/O and cancellation; change only proven problems.
+7. Configure Fish Audio S2.1 Pro for English, respecting the voice-ID requirement.
+8. Test LiveKit preemptive generation and preemptive TTS as isolated variants.
+9. Run unit, debugger and browser tests.
+10. Update `docs/latency-baseline.md` with the exact model/provider configuration, benchmark method, results, sample counts, limitations and rollback instructions.
+11. Summarize changed files, dependency/API upgrades, MCP docs and skills used, test commands/results, measured before/after latency, remaining bottlenecks and a suggested commit message.
+
+Do not commit or push unless explicitly requested. Do not modify frontend, token generation, dispatch, database schema or unrelated milestones unless a demonstrated dependency requires it.
