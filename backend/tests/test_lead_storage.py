@@ -1,16 +1,51 @@
 from __future__ import annotations
 
 import duckdb
+import pandas as pd
 import pytest
 
 from voiceforce_agent.lead_storage import DemoLeadDatabase, LeadStorageError
+from voiceforce_agent.property_records import (
+    canonical_frame_from_demo,
+    create_property_records_table,
+    insert_canonical_frame,
+)
 
 
 def _build_database(tmp_path):
     database = tmp_path / "voiceforce.duckdb"
+    frame = pd.DataFrame(
+        [
+            {
+                "listing_id": "DEMO-001",
+                "title": "Synthetic Apartment",
+                "listing_type": "sale",
+                "property_type": "Apartment",
+                "community": "Dubai Marina",
+                "building_name": "Synthetic Residence",
+                "bedrooms": 2,
+                "bathrooms": 2,
+                "area_sqft": 1000,
+                "price_aed": 2_000_000,
+                "price_per_sqft_aed": 2000.0,
+                "furnishing": "furnished",
+                "view_type": "community",
+                "property_condition": "excellent",
+                "availability_status": "simulated_available",
+                "parking_spaces": 1,
+                "amenities": "Gym",
+                "description": "Synthetic demo property.",
+                "currency": "AED",
+                "source_type": "synthetic_demo",
+                "is_synthetic": True,
+                "demo_data_notice": "Synthetic demo data only.",
+                "created_date": "2025-01-01",
+            }
+        ]
+    )
     with duckdb.connect(str(database)) as connection:
-        connection.execute("CREATE TABLE demo_property_listings (listing_id VARCHAR)")
-        connection.execute("INSERT INTO demo_property_listings VALUES ('DEMO-001')")
+        create_property_records_table(connection)
+        insert_canonical_frame(connection, canonical_frame_from_demo(frame))
     return database
 
 

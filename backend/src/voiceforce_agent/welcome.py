@@ -18,29 +18,9 @@ from .state import PropertySalesSessionData
 
 logger = logging.getLogger(__name__)
 
-WELCOME_INTRODUCTIONS: tuple[tuple[SupportedLanguage, str, str], ...] = (
-    (
-        "en",
-        "English",
-        "Hello! Welcome to VoiceForce AI. I'm your English-speaking assistant. "
-        "Let me introduce our other language assistants.",
-    ),
-    (
-        "ur",
-        "Urdu / Aarav",
-        "السلام علیکم! میں آرو ہوں، آپ کا اردو اسسٹنٹ۔ میں آپ کی اردو میں مدد کر سکتا ہوں۔",
-    ),
-    (
-        "ar",
-        "Arabic / Omar",
-        "مرحباً! أنا عمر، مساعدك باللغة العربية. يسعدني مساعدتك باللغة العربية.",
-    ),
-)
-
-LANGUAGE_SELECTION_PROMPTS: tuple[tuple[SupportedLanguage, str], ...] = (
-    ("en", "Please choose English, Urdu with Aarav, or Arabic with Omar."),
-    ("ur", "براہِ کرم انگریزی، آرو کے ساتھ اردو، یا عمر کے ساتھ عربی منتخب کریں۔"),
-    ("ar", "يرجى اختيار الإنجليزية، أو الأردية مع آرو، أو العربية مع عمر."),
+WELCOME_PROMPT = (
+    "Welcome to Prime Properties Dubai. You can speak English, Urdu, or Arabic. "
+    "Which language would you prefer?"
 )
 
 _LANGUAGE_ALIASES: dict[str, SupportedLanguage] = {
@@ -68,6 +48,10 @@ _LANGUAGE_ALIASES: dict[str, SupportedLanguage] = {
 
 StatusPublisher = Callable[[dict[str, Any]], Awaitable[None]]
 ReceptionistFactory = Callable[[ChatContext], Receptionist]
+
+
+class _WelcomeSessionClosingError(Exception):
+    """Internal signal for a caller ending the session during the welcome."""
 
 
 def normalize_language_selection(value: object) -> SupportedLanguage | None:
@@ -102,7 +86,8 @@ class LanguageSelectionAgent(Agent):
             id="language_selector",
             instructions=(
                 "You are the VoiceForce AI language selector. The caller has just "
-                "heard short introductions in English, Pakistani Urdu, and Arabic. "
+                "heard one short English prompt naming English, Urdu with Aarav, "
+                "and Arabic with Omar. "
                 "Do not answer property questions and do not use any property tools. "
                 "Listen for one clear language choice. If the caller says English, "
                 "English please, Urdu, Urdu mein, اردو, or Arabic, العربية, call "
@@ -226,21 +211,12 @@ class WelcomeCoordinator:
         self._record("welcome_sequence_started")
 
         try:
-            for language, label, text in WELCOME_INTRODUCTIONS:
-                await self._speak_step(
-                    language,
-                    label=label,
-                    text=text,
-                    step="introduction",
-                )
-
-            for language, text in LANGUAGE_SELECTION_PROMPTS:
-                await self._speak_step(
-                    language,
-                    label=f"{language} selection prompt",
-                    text=text,
-                    step="selection_prompt",
-                )
+            await self._speak_step(
+                "en",
+                label="Choose your language",
+                text=WELCOME_PROMPT,
+                step="language_selection",
+            )
 
             userdata.welcome_sequence_completed = True
             self._record(
@@ -257,6 +233,11 @@ class WelcomeCoordinator:
                 }
             )
             return True
+        except _WelcomeSessionClosingError:
+            self._record(
+                "welcome_sequence_cancelled", labels={"reason": "session_closing"}
+            )
+            return False
         except Exception as error:
             self._record(
                 "welcome_sequence_failed",
@@ -292,14 +273,23 @@ class WelcomeCoordinator:
             raise RuntimeError(f"unable to activate the {language} welcome voice")
 
         started = time.perf_counter()
-        handle = self.session.say(
-            text,
-            allow_interruptions=False,
-            add_to_chat_ctx=False,
-        )
-        await handle.wait_for_playout()
+        try:
+            handle = self.session.say(
+                text,
+                allow_interruptions=False,
+                add_to_chat_ctx=False,
+            )
+            await handle.wait_for_playout()
+        except RuntimeError as error:
+            if "AgentSession is closing" in str(error):
+                raise _WelcomeSessionClosingError from error
+            raise
         error = handle.exception()
         if error is not None:
+            if isinstance(error, RuntimeError) and "AgentSession is closing" in str(
+                error
+            ):
+                raise _WelcomeSessionClosingError from error
             raise error
         self._record(
             "welcome_step_duration",

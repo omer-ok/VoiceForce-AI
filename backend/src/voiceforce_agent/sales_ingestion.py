@@ -10,6 +10,16 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
+from .property_records import (
+    DEMO_SOURCE_TABLE,
+    HISTORICAL_RECORD_KIND,
+    HISTORICAL_SOURCE_TABLE,
+    canonical_frame_from_historical,
+    create_compatibility_view,
+    create_property_records_table,
+    insert_canonical_frame,
+    object_type,
+)
 from .sales_data import (
     DATASET_GENERATION_NOTE,
     DATASET_HANDLE,
@@ -221,49 +231,54 @@ def ingest_secondary_sales(
     database.parent.mkdir(parents=True, exist_ok=True)
 
     with duckdb.connect(str(database)) as connection:
-        connection.register("sales_frame", frame)
-        connection.execute(
-            """
-            CREATE OR REPLACE TABLE secondary_sales AS
-            SELECT
-                CAST(id AS VARCHAR) AS id,
-                CAST(date_listed AS DATE) AS date_listed,
-                CAST(community AS VARCHAR) AS community,
-                CAST(zone AS VARCHAR) AS zone,
-                CAST(is_freehold AS BOOLEAN) AS is_freehold,
-                CAST(lat AS DOUBLE) AS lat,
-                CAST(lon AS DOUBLE) AS lon,
-                CAST(property_category AS VARCHAR) AS property_category,
-                CAST(property_type AS VARCHAR) AS property_type,
-                CAST(bedrooms AS INTEGER) AS bedrooms,
-                CAST(area_sqft AS DOUBLE) AS area_sqft,
-                CAST(area_m2 AS DOUBLE) AS area_m2,
-                CAST(floor AS DOUBLE) AS floor,
-                CAST(total_floors AS DOUBLE) AS total_floors,
-                CAST(year_built AS INTEGER) AS year_built,
-                CAST(view AS VARCHAR) AS view,
-                CAST(furnishing AS VARCHAR) AS furnishing,
-                CAST(condition AS VARCHAR) AS condition,
-                CAST(parking_spaces AS INTEGER) AS parking_spaces,
-                CAST(chiller_included AS BOOLEAN) AS chiller_included,
-                CAST(metro_station AS VARCHAR) AS metro_station,
-                CAST(metro_line AS VARCHAR) AS metro_line,
-                CAST(metro_distance_min AS INTEGER) AS metro_distance_min,
-                CAST(metro_distance_type AS VARCHAR) AS metro_distance_type,
-                CAST(to_burj_khalifa_km AS DOUBLE) AS to_burj_khalifa_km,
-                CAST(price_usd AS DOUBLE) AS price_usd,
-                CAST(price_per_sqft_usd AS DOUBLE) AS price_per_sqft_usd,
-                CAST(price_per_m2_usd AS DOUBLE) AS price_per_m2_usd,
-                CAST(mortgage_rate_at_listing AS DOUBLE) AS mortgage_rate_at_listing
-            FROM sales_frame
-            """
-        )
-        connection.unregister("sales_frame")
-        connection.register("provenance_frame", _provenance(source, report))
-        connection.execute(
-            "CREATE OR REPLACE TABLE dataset_provenance AS SELECT * FROM provenance_frame"
-        )
-        connection.unregister("provenance_frame")
+        canonical_type = object_type(connection, "property_records")
+        historical_type = object_type(connection, HISTORICAL_SOURCE_TABLE)
+        if canonical_type is None and historical_type == "BASE TABLE":
+            raise ValueError(
+                "the database still has legacy source tables; run "
+                "migrate_property_records.py before ingesting updates"
+            )
+        if canonical_type not in {None, "BASE TABLE"}:
+            raise ValueError("property_records must be a physical table")
+        if historical_type == "BASE TABLE":
+            raise ValueError(
+                "secondary_sales is still a physical table; migrate it before ingesting"
+            )
+
+        canonical = canonical_frame_from_historical(frame)
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            create_property_records_table(connection)
+            connection.execute(
+                """
+                DELETE FROM property_records
+                WHERE record_kind = ? AND source_table = ?
+                """,
+                [HISTORICAL_RECORD_KIND, HISTORICAL_SOURCE_TABLE],
+            )
+            insert_canonical_frame(connection, canonical)
+            connection.register("provenance_frame", _provenance(source, report))
+            try:
+                connection.execute(
+                    """
+                    CREATE OR REPLACE TABLE dataset_provenance AS
+                    SELECT * FROM provenance_frame
+                    """
+                )
+            finally:
+                connection.unregister("provenance_frame")
+
+            for view_name in (HISTORICAL_SOURCE_TABLE, DEMO_SOURCE_TABLE):
+                if object_type(connection, view_name) is None:
+                    create_compatibility_view(connection, view_name)
+                elif object_type(connection, view_name) == "BASE TABLE":
+                    raise ValueError(
+                        f"{view_name} is still a physical table; migrate it first"
+                    )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
 
     return report
 

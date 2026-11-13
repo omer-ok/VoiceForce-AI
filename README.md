@@ -36,12 +36,13 @@ The Python backend registers the same named agent with `AgentServer` and uses
 `AgentSession` with LiveKit Inference for:
 
 - STT: AssemblyAI Universal-3-6-Pro.
-- LLM: OpenAI GPT-5 Mini.
+- LLM: OpenAI GPT-5.6 Terra through LiveKit Inference for the latest local
+  latency test. The configurable default is GPT-5 Mini.
 - TTS: Inworld Realtime TTS-2 Flash through LiveKit Inference.
 
 The receptionist has three historical-data tools backed by DuckDB:
 `search_historical_sales`, `get_market_insights`, and `compare_areas`. It also
-has `search_demo_properties` for the 100-record synthetic AED inventory and
+has `search_demo_properties` for the 500-record synthetic AED inventory and
 `capture_customer_lead` for consent-gated demo enquiries. Historical results
 remain clearly labelled as historical dataset records, while demo results are
 clearly labelled as synthetic with simulated availability.
@@ -76,10 +77,10 @@ The active language routes are:
 | Urdu | `ur` | Inworld Realtime TTS-2 Flash (`inworld/inworld-tts-2-flash`) | Aarav | `ur-PK` |
 | Arabic | `ar` | Inworld Realtime TTS-2 Flash (`inworld/inworld-tts-2-flash`) | Omar | `ar-SA` |
 
-The browser welcome flow introduces all three options and hands the same
-`AgentSession` to the selected receptionist. Urdu responses are requested as
-Urdu rather than Hindi, and Arabic/Urdu language state is preserved for the
-session while still allowing deliberate language switches.
+The browser welcome flow plays one concise English language-selection prompt
+and hands the same `AgentSession` to the selected receptionist. Urdu responses
+are requested as Urdu rather than Hindi, and Arabic/Urdu language state is
+preserved for the session while still allowing deliberate language switches.
 
 - Planned retrieval architecture: DuckDB, LlamaIndex, and Qdrant.
 
@@ -159,19 +160,32 @@ physical speaker.
 
 ## Environment variables
 
-Create the repository-root `.env.local` file with the required names below.
-Keep its values private; it is excluded from Git.
+Create the repository-root `.env.local` file with the required LiveKit names
+and any desired optional settings below. Keep its values private; it is
+excluded from Git.
 
 ```text
 LIVEKIT_URL
 LIVEKIT_API_KEY
 LIVEKIT_API_SECRET
 NEXT_PUBLIC_LIVEKIT_URL
+VOICEFORCE_LLM_MODEL
+VOICEFORCE_LLM_REASONING_EFFORT
+VOICEFORCE_LLM_MAX_COMPLETION_TOKENS
+VOICEFORCE_PREEMPTIVE_TTS
+VOICEFORCE_PREEMPTIVE_TTS_MAX_SPEECH_SECONDS
+VOICEFORCE_PREEMPTIVE_TTS_MAX_RETRIES
+VOICEFORCE_FAST_PROPERTY_RESULTS
 VOICEFORCE_INWORLD_MODEL
 VOICEFORCE_INWORLD_ENGLISH_VOICE
 VOICEFORCE_INWORLD_URDU_VOICE
 VOICEFORCE_INWORLD_ARABIC_VOICE
 ```
+
+The LLM and latency settings are optional; see `backend/.env.example` for
+defaults. `VOICEFORCE_FAST_PROPERTY_RESULTS` is `false` by default and can be
+set to `true` for an experimental local test. Restart the backend after changing
+its environment.
 
 The Python backend and Next.js token route read the server-side LiveKit
 credentials from the root environment file. The browser does not receive
@@ -183,6 +197,9 @@ from the token endpoint rather than constructing a token in browser code.
 From the repository root:
 
 ```bash
+set -a
+source .env.local
+set +a
 cd backend
 uv sync
 python -m voiceforce_agent.sales_ingestion \
@@ -196,7 +213,18 @@ The backend registers the `voiceforce-receptionist` agent. The explicit `dev`
 deployment matches the local Next.js Session configuration.
 
 The generator creates or refreshes the local `demo_property_listings` table
-without replacing `secondary_sales` or `dataset_provenance`.
+through the canonical `property_records` table. On a legacy database, run the
+normalization migration before the generator:
+
+```bash
+cd backend
+uv run python scripts/migrate_property_records.py
+uv run python scripts/generate_demo_listings.py
+```
+
+The migration exports both legacy source tables, preserves `demo_leads` and
+`dataset_provenance`, and replaces the source table names with read-only
+compatibility views.
 
 ## Run the frontend
 
@@ -232,9 +260,74 @@ The token route accepts the Session API's `room_config`, validates the agent
 name and deployment, and uses that validated configuration for LiveKit agent
 dispatch. There is no separate manual dispatch mechanism in the frontend.
 
-## Voice latency matrix
+## Voice latency and optimization status
 
-The following is the latest fresh local audio-mode debugger measurement for the
+The latest manual English browser call was recorded on **13 November 2026**
+using AssemblyAI STT, GPT-5.6 Terra (`reasoning_effort=none`), Inworld TTS,
+STT endpointing, and the experimental fast-result path enabled. These are
+engineering observations from one call, not a controlled benchmark.
+
+| Measurement | Latest call | Interpretation |
+| --- | --- | --- |
+| Backend end-to-end | 1.71, 1.80, 3.66, 4.38 s (`N=4`) | Two responses exceeded 3 s; the 3.66 s response was interrupted. The fast-result reply had no available backend E2E measurement. |
+| LLM time to first token | 1.12–1.55 s (`N=4`) | Per-turn backend LLM metric; not caller-heard latency. |
+| TTS time to first audio | 0.32–0.94 s (`N=5`) | Provider/pipeline metric; includes one 0.94 s outlier. |
+| Database query duration | 0.016–0.365 s (`N=3`) | The two no-result searches took about 0.016–0.017 s each. |
+| Browser speech-end to remote signal | 1.06, 3.98, 4.62 s (`N=3`) | Uncalibrated signal estimates; they cannot reliably distinguish an acknowledgement from the answer or prove speaker playback. |
+
+For context, an earlier call with the fast-result candidate disabled recorded
+21 backend E2E responses: P50 **4.15 s**, P90 **5.84 s**, P95 **6.54 s**,
+maximum **8.42 s**, and **17 responses over 3 s**. The report uses nearest-rank
+percentiles. The latest call had only four E2E samples, so its tail cannot be
+estimated reliably; the different calls and scenarios do not establish a
+before-and-after speedup. Browser and backend clocks are separate and must not
+be subtracted from one another.
+
+Changes implemented to reduce latency and improve visibility:
+
+- Replaced the six-part welcome with one concise language-selection prompt.
+- Configured AssemblyAI's low-latency STT mode and STT-based turn detection,
+  with no additional LiveKit endpointing delay. Reported STT/end-of-turn
+  timings are SDK metrics, not an acoustic stopwatch.
+- Added configurable LLM selection and reasoning effort, bounded preemptive TTS,
+  and shorter conversational context. The tested Terra configuration is an
+  environment setting; GPT-5 Mini remains the code default.
+- Added a short, interruptible search acknowledgement and an **opt-in**
+  grounded template for a qualifying single demo result. It retains the
+  search result for follow-up and states that availability is simulated. The
+  template ran once in the latest call, but its caller-heard answer latency was
+  not reliably measured. General questions, ambiguous requests, no-result
+  searches, historical analysis, and lead capture use the existing path.
+- Added per-response slow-turn records and explicit LiveKit speech, chat-item,
+  and tool-call links where available. The browser also records an independent
+  signal estimate; missing correlations remain unavailable.
+
+The two slowest measured responses in the latest call were no-result searches,
+which still require a model-generated follow-up after the database lookup.
+Reducing that additional model work and investigating the TTS outlier are
+next steps. The fast-result candidate has **not** met its promotion gates:
+the required controlled audio comparison and browser detector calibration
+remain incomplete after the simulated-caller TTS request received HTTP 429.
+The current data does not demonstrate a consistent sub-3-second response.
+
+To reproduce an isolated backend report without mixing historical records:
+
+```bash
+cd backend
+uv run python scripts/summarize_latency.py \
+  --input data/latency_metrics.jsonl \
+  --session-id <livekit-job-id> \
+  --diagnostic
+```
+
+The benchmark scenarios are defined in
+[`backend/scenarios/voice_latency_benchmark.yaml`](backend/scenarios/voice_latency_benchmark.yaml).
+See [`docs/latency-baseline.md`](docs/latency-baseline.md) for metric semantics
+and the measurement workflow.
+
+### Historical language-route debugger observations
+
+The following is an earlier local audio-mode debugger measurement for the
 three selected language routes. It used one fresh session per route and two
 steady-state receptionist turns after the language-selection handoff. The
 sample is too small for release or production P95 claims.
@@ -261,7 +354,7 @@ The separate cold/session-start observations were:
 
 | Cold sequence | English | Urdu | Arabic |
 | --- | ---: | ---: | ---: |
-| Six-segment welcome sequence (`N=1`) | 43.930s | 41.582s | 44.360s |
+| Previous six-segment welcome sequence (`N=1`) | 43.930s | 41.582s | 44.360s |
 | Language-selection handoff E2E (`N=1`) | 10.379s | 7.234s | 6.325s |
 
 These cold values are not normal conversational-turn measurements. No property
@@ -285,7 +378,7 @@ turns while Simon has one, and browser playback was not measured. The Simon
 session did emit audio through the configured LiveKit route, with backend logs
 confirming `inworld/inworld-tts-2-flash`, voice `Simon`, and locale `en`.
 
-The current evidence points to the LLM as the largest steady-state latency
+The historical evidence points to the LLM as the largest steady-state latency
 component. The English values in this table are the old Fish Audio baseline;
 the post-migration Simon comparison is shown above from a fresh session with
 the new route. Urdu's second turn contained a synthetic-input STT anomaly and
@@ -337,14 +430,18 @@ future semantic-retrieval components.
 
 ## Milestone 4 demo sales scope
 
-The current sales consultant uses only the local `demo_property_listings`
-table. It supports buy-versus-rent intent, community, property type, bedroom
-and bathroom count, AED budget, furnishing, and result selection. The actual
-demo schema has no ready/off-plan field, so that preference is recorded but not
-used as a filter.
+The current sales consultant uses the canonical local `property_records` table
+with a synthetic-demo source filter. It supports buy-versus-rent intent,
+community, property type, bedroom and bathroom count, AED budget, furnishing,
+and result selection. The actual demo schema has no ready/off-plan field, so
+that preference is recorded but not used as a filter.
 
-All 100 records are synthetic and illustrative. Simulated availability is not
-verified live inventory, and no result should be represented as a genuine
-listing or current offer. Lead capture writes to a separate `demo_leads` table
-only after explicit customer consent and confirmation of the name and phone
-number.
+All 500 records are synthetic and illustrative: 250 are sale records and 250
+are rental records. The generator uses a fixed seed and backs up the existing
+marked demo rows before replacement. Simulated availability is not verified
+live inventory, and no result should be represented as a genuine listing or
+current offer. Canonical storage also contains 50,000 historical sale records;
+historical analytics remain source-scoped, use native USD prices, and never
+appear in demo availability searches. Lead capture writes to a separate
+`demo_leads` table only after explicit customer consent and confirmation of the
+name and phone number.

@@ -8,8 +8,20 @@ from types import SimpleNamespace
 import duckdb
 import pandas as pd
 import pytest
-from livekit.agents.llm import ToolError
+from livekit.agents.llm import ToolError, ToolResult
 
+from scripts.generate_demo_listings import (
+    DEFAULT_COUNT,
+    DEFAULT_LISTING_TYPE_COUNTS,
+    generate_listings,
+    import_into_duckdb,
+)
+from voiceforce_agent.property_records import (
+    canonical_frame_from_demo,
+    create_compatibility_views,
+    create_property_records_table,
+    insert_canonical_frame,
+)
 from voiceforce_agent.property_search import DemoPropertyDatabase
 from voiceforce_agent.receptionist import Receptionist
 from voiceforce_agent.state import PropertySalesSessionData
@@ -130,12 +142,20 @@ def _build_database(tmp_path):
         columns=DEMO_COLUMNS,
     )
     frame["created_date"] = pd.to_datetime(frame["created_date"]).dt.date
+    canonical = canonical_frame_from_demo(frame)
     with duckdb.connect(str(database)) as connection:
-        connection.register("demo_frame", frame)
-        connection.execute(
-            "CREATE TABLE demo_property_listings AS SELECT * FROM demo_frame"
-        )
-        connection.unregister("demo_frame")
+        create_property_records_table(connection)
+        insert_canonical_frame(connection, canonical)
+        create_compatibility_views(connection)
+    return database
+
+
+def _build_seeded_database(tmp_path):
+    database = tmp_path / "seeded_voiceforce.duckdb"
+    with duckdb.connect(str(database)) as connection:
+        create_property_records_table(connection)
+        connection.execute("CREATE TABLE dataset_provenance (dataset_handle VARCHAR)")
+    import_into_duckdb(generate_listings(), database)
     return database
 
 
@@ -320,6 +340,33 @@ def test_inventory_summary_uses_actual_demo_table(tmp_path) -> None:
     }
 
 
+def test_seeded_inventory_has_balanced_sale_rent_search_and_pagination(
+    tmp_path,
+) -> None:
+    search = DemoPropertyDatabase(_build_seeded_database(tmp_path))
+
+    summary = search.inventory_summary()
+    assert summary["total_records"] == DEFAULT_COUNT
+    assert {
+        row["listing_type"]: row["count"] for row in summary["transaction_types"]
+    } == DEFAULT_LISTING_TYPE_COUNTS
+
+    sale = search.search(transaction_intent="buy", limit=5)
+    rent = search.search(transaction_intent="rent", limit=5)
+
+    assert sale["match_count"] == DEFAULT_LISTING_TYPE_COUNTS["sale"]
+    assert rent["match_count"] == DEFAULT_LISTING_TYPE_COUNTS["rent"]
+    assert sale["result_count"] == rent["result_count"] == 5
+    assert sale["filters"]["price_basis"] == "purchase_price"
+    assert rent["filters"]["price_basis"] == "annual_rent"
+    assert [row["price_aed"] for row in sale["results"]] == sorted(
+        row["price_aed"] for row in sale["results"]
+    )
+    assert [row["price_aed"] for row in rent["results"]] == sorted(
+        row["price_aed"] for row in rent["results"]
+    )
+
+
 def test_receptionist_keeps_explicit_clears_after_database_failure(tmp_path) -> None:
     receptionist = Receptionist()
     receptionist.property_database = DemoPropertyDatabase(_build_database(tmp_path))
@@ -360,3 +407,192 @@ def test_receptionist_keeps_explicit_clears_after_database_failure(tmp_path) -> 
     assert context.userdata.preferred_community is None
     assert context.userdata.property_type is None
     assert context.userdata.bedrooms is None
+
+
+@pytest.mark.parametrize(
+    ("intent", "period"), [("sale", "purchase price"), ("rent", "annual rent")]
+)
+async def test_fast_search_uses_grounded_result_and_keeps_tool_history(
+    tmp_path, monkeypatch, intent, period
+) -> None:
+    monkeypatch.setenv("VOICEFORCE_FAST_PROPERTY_RESULTS", "true")
+    receptionist = Receptionist()
+    receptionist.property_database = DemoPropertyDatabase(_build_database(tmp_path))
+    state = PropertySalesSessionData()
+    spoken = []
+    context = SimpleNamespace(
+        userdata=state,
+        speech_handle=SimpleNamespace(id="speech-1", interrupted=False),
+        session=SimpleNamespace(
+            say=lambda text, **kwargs: spoken.append((text, kwargs))
+        ),
+    )
+    result = await Receptionist.search_demo_properties._func(
+        receptionist,
+        context,
+        transaction_intent=intent,
+        community="Dubai Marina",
+        brief_result_requested=True,
+    )
+
+    assert isinstance(result, ToolResult)
+    assert result.reply_required is False
+    assert (
+        result.output["results"][0]["listing_id"]
+        == state.last_demo_results[0]["listing_id"]
+    )
+    assert state.selected_listing_ids == []
+    assert period in spoken[0][0]
+    assert "simulated, not verified" in spoken[0][0]
+    assert str(result.output["results"][0]["price_aed"]) in spoken[0][0].replace(
+        ",", ""
+    )
+
+
+async def test_fast_search_falls_back_when_interrupted_or_no_result(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("VOICEFORCE_FAST_PROPERTY_RESULTS", "true")
+    receptionist = Receptionist()
+    receptionist.property_database = DemoPropertyDatabase(_build_database(tmp_path))
+    spoken = []
+    context = SimpleNamespace(
+        userdata=PropertySalesSessionData(),
+        speech_handle=SimpleNamespace(id="speech-1", interrupted=True),
+        session=SimpleNamespace(say=lambda text, **kwargs: spoken.append(text)),
+    )
+    result = await Receptionist.search_demo_properties._func(
+        receptionist, context, transaction_intent="rent", brief_result_requested=True
+    )
+    assert isinstance(result, dict)
+    assert not spoken
+    context.speech_handle.interrupted = False
+    result = await Receptionist.search_demo_properties._func(
+        receptionist,
+        context,
+        transaction_intent="rent",
+        max_budget_aed=1,
+        brief_result_requested=True,
+    )
+    assert isinstance(result, dict)
+    assert result["status"] == "no_results"
+    assert not spoken
+
+
+async def test_fast_search_falls_back_when_speech_cannot_be_scheduled(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("VOICEFORCE_FAST_PROPERTY_RESULTS", "true")
+    receptionist = Receptionist()
+    receptionist.property_database = DemoPropertyDatabase(_build_database(tmp_path))
+
+    def failed_speech(*_args, **_kwargs):
+        raise RuntimeError("speech unavailable")
+
+    context = SimpleNamespace(
+        userdata=PropertySalesSessionData(),
+        speech_handle=SimpleNamespace(id="speech-1", interrupted=False),
+        session=SimpleNamespace(say=failed_speech),
+    )
+    result = await Receptionist.search_demo_properties._func(
+        receptionist, context, transaction_intent="rent", brief_result_requested=True
+    )
+    assert isinstance(result, dict)
+    assert result["status"] == "matches"
+
+
+async def test_detailed_search_does_not_use_fast_result(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("VOICEFORCE_FAST_PROPERTY_RESULTS", "true")
+    receptionist = Receptionist()
+    receptionist.property_database = DemoPropertyDatabase(_build_database(tmp_path))
+    spoken = []
+    context = SimpleNamespace(
+        userdata=PropertySalesSessionData(),
+        speech_handle=SimpleNamespace(id="speech-1", interrupted=False),
+        session=SimpleNamespace(say=lambda *_args, **_kwargs: spoken.append(True)),
+    )
+    result = await Receptionist.search_demo_properties._func(
+        receptionist, context, transaction_intent="rent", brief_result_requested=False
+    )
+    assert isinstance(result, dict)
+    assert result["status"] == "matches"
+    assert not spoken
+
+
+async def test_fast_search_cancels_queued_reply_after_caller_interrupts(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("VOICEFORCE_FAST_PROPERTY_RESULTS", "true")
+    receptionist = Receptionist()
+    receptionist.property_database = DemoPropertyDatabase(_build_database(tmp_path))
+    callbacks = []
+    cancelled = []
+    reply = SimpleNamespace(
+        done=lambda: False, interrupt=lambda: cancelled.append(True)
+    )
+    parent = SimpleNamespace(
+        id="speech-1", interrupted=False, add_done_callback=callbacks.append
+    )
+    context = SimpleNamespace(
+        userdata=PropertySalesSessionData(),
+        speech_handle=parent,
+        session=SimpleNamespace(say=lambda *_args, **_kwargs: reply),
+    )
+    result = await Receptionist.search_demo_properties._func(
+        receptionist, context, transaction_intent="rent", brief_result_requested=True
+    )
+    assert isinstance(result, ToolResult)
+    assert len(callbacks) == 1
+    parent.interrupted = True
+    callbacks[0](parent)
+    assert cancelled == [True]
+
+
+@pytest.mark.parametrize(
+    "condition", ["none", "new_activity", "caller_speaking", "interrupted"]
+)
+async def test_fast_search_tts_failure_recovery_never_replays_stale_result(
+    tmp_path, monkeypatch, condition
+) -> None:
+    monkeypatch.setenv("VOICEFORCE_FAST_PROPERTY_RESULTS", "true")
+    receptionist = Receptionist()
+    receptionist.property_database = DemoPropertyDatabase(_build_database(tmp_path))
+    parent_callbacks = []
+    reply_callbacks = []
+    spoken = []
+    reply = SimpleNamespace(
+        id="reply-1",
+        interrupted=False,
+        exception=lambda: RuntimeError("tts failed"),
+        add_done_callback=reply_callbacks.append,
+    )
+    parent = SimpleNamespace(
+        id="speech-1", interrupted=False, add_done_callback=parent_callbacks.append
+    )
+    state = PropertySalesSessionData()
+    session = SimpleNamespace(user_state="listening", current_speech=None)
+
+    def say(text, **_kwargs):
+        spoken.append(text)
+        return reply
+
+    session.say = say
+    context = SimpleNamespace(userdata=state, speech_handle=parent, session=session)
+    result = await Receptionist.search_demo_properties._func(
+        receptionist, context, transaction_intent="rent", brief_result_requested=True
+    )
+    assert isinstance(result, ToolResult)
+    assert len(reply_callbacks) == 1
+    if condition == "new_activity":
+        state.caller_activity_revision += 1
+    elif condition == "caller_speaking":
+        session.user_state = "speaking"
+    elif condition == "interrupted":
+        parent.interrupted = True
+    reply_callbacks[0](reply)
+    if condition != "none":
+        assert len(spoken) == 1
+    else:
+        assert len(spoken) == 2
+        assert "audio problem" in spoken[1]
+        assert "AED" not in spoken[1]

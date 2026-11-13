@@ -17,7 +17,7 @@ from .sales_data import (
 
 
 class HistoricalSalesDatabase:
-    """Parameterized DuckDB queries over the cleaned secondary sales table."""
+    """Parameterized DuckDB queries over canonical historical records."""
 
     def __init__(self, database_path: str | Path | None = None) -> None:
         configured_path = database_path or os.getenv("VOICEFORCE_SALES_DB")
@@ -106,7 +106,13 @@ class HistoricalSalesDatabase:
         if start is not None and end is not None and start > end:
             raise ValueError("start_date cannot be after end_date")
 
-        clauses = ["TRUE"]
+        clauses = [
+            "record_kind = 'historical_transaction'",
+            "listing_purpose = 'sale'",
+            "source_table = 'secondary_sales'",
+            "currency = 'USD'",
+            "is_synthetic_demo = FALSE",
+        ]
         parameters: list[Any] = []
         filters: dict[str, Any] = {}
 
@@ -117,19 +123,19 @@ class HistoricalSalesDatabase:
 
         if normalized_property_type:
             if normalized_property_type.lower() in {"apartment", "villa"}:
-                clauses.append("lower(property_category) = lower(?)")
+                clauses.append("lower(normalized_property_type) = lower(?)")
             else:
-                clauses.append("lower(property_type) = lower(?)")
+                clauses.append("lower(historical_property_type) = lower(?)")
             parameters.append(normalized_property_type)
             filters["property_type"] = normalized_property_type
 
         if minimum is not None:
-            clauses.append("price_usd >= ?")
+            clauses.append("price_amount >= ?")
             parameters.append(minimum)
             filters["min_price_usd"] = minimum
 
         if maximum is not None:
-            clauses.append("price_usd <= ?")
+            clauses.append("price_amount <= ?")
             parameters.append(maximum)
             filters["max_price_usd"] = maximum
 
@@ -139,12 +145,12 @@ class HistoricalSalesDatabase:
             filters["bedrooms"] = bedroom_count
 
         if start is not None:
-            clauses.append("date_listed >= ?")
+            clauses.append("record_date >= ?")
             parameters.append(start)
             filters["start_date"] = start.isoformat()
 
         if end is not None:
-            clauses.append("date_listed <= ?")
+            clauses.append("record_date <= ?")
             parameters.append(end)
             filters["end_date"] = end.isoformat()
 
@@ -181,13 +187,13 @@ class HistoricalSalesDatabase:
             f"""
             SELECT
                 COUNT(*)::BIGINT AS record_count,
-                AVG(price_usd) AS average_price_usd,
-                MEDIAN(price_usd) AS median_price_usd,
-                AVG(price_per_sqft_usd) AS average_price_per_sqft_usd,
-                MEDIAN(price_per_sqft_usd) AS median_price_per_sqft_usd,
-                MIN(date_listed) AS earliest_date,
-                MAX(date_listed) AS latest_date
-            FROM secondary_sales
+                AVG(price_amount) AS average_price_usd,
+                MEDIAN(price_amount) AS median_price_usd,
+                AVG(historical_price_per_sqft_usd) AS average_price_per_sqft_usd,
+                MEDIAN(historical_price_per_sqft_usd) AS median_price_per_sqft_usd,
+                MIN(record_date) AS earliest_date,
+                MAX(record_date) AS latest_date
+            FROM property_records
             WHERE {where}
             """,
             parameters,
@@ -238,12 +244,20 @@ class HistoricalSalesDatabase:
             summary = self._summary(connection, where, parameters)
             sample_cursor = connection.execute(
                 f"""
-                SELECT id, date_listed, community, zone, property_category,
-                       property_type, bedrooms, area_sqft, price_usd,
-                       price_per_sqft_usd, condition
-                FROM secondary_sales
+                SELECT historical_id AS id,
+                       historical_date_listed AS date_listed,
+                       historical_community AS community,
+                       historical_zone AS zone,
+                       historical_property_category AS property_category,
+                       historical_property_type AS property_type,
+                       historical_bedrooms AS bedrooms,
+                       historical_area_sqft AS area_sqft,
+                       historical_price_usd AS price_usd,
+                       historical_price_per_sqft_usd AS price_per_sqft_usd,
+                       historical_condition AS condition
+                FROM property_records
                 WHERE {where}
-                ORDER BY date_listed DESC, id
+                ORDER BY record_date DESC, source_record_id
                 LIMIT ?
                 """,
                 [*parameters, limit],
@@ -285,7 +299,7 @@ class HistoricalSalesDatabase:
             start_date=start_date,
             end_date=end_date,
         )
-        period_expression = f"date_trunc('{granularity}', date_listed)"
+        period_expression = f"date_trunc('{granularity}', record_date)"
 
         with self._connect() as connection:
             summary = self._summary(connection, where, parameters)
@@ -294,10 +308,10 @@ class HistoricalSalesDatabase:
                 SELECT
                     CAST({period_expression} AS DATE) AS period,
                     COUNT(*)::BIGINT AS record_count,
-                    AVG(price_usd) AS average_price_usd,
-                    MEDIAN(price_usd) AS median_price_usd,
-                    AVG(price_per_sqft_usd) AS average_price_per_sqft_usd
-                FROM secondary_sales
+                    AVG(price_amount) AS average_price_usd,
+                    MEDIAN(price_amount) AS median_price_usd,
+                    AVG(historical_price_per_sqft_usd) AS average_price_per_sqft_usd
+                FROM property_records
                 WHERE {where}
                 GROUP BY period
                 ORDER BY period

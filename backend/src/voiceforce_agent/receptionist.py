@@ -6,13 +6,16 @@ import logging
 import textwrap
 import time
 from collections.abc import AsyncIterable, AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 from livekit import rtc
 from livekit.agents import Agent, ChatContext, ModelSettings, RunContext, function_tool
-from livekit.agents.llm import ToolError
+from livekit.agents.llm import ToolError, ToolResult
 from livekit.agents.llm.tool_context import ToolFlag
 
+from .config import configured_fast_property_results
+from .fast_property_reply import render_demo_result
 from .language_router import MultilingualTTSRouter
 from .latency_metrics import LatencyRecorder
 from .lead_storage import DemoLeadDatabase, LeadStorageError
@@ -23,6 +26,79 @@ from .state import PropertySalesSessionData
 
 logger = logging.getLogger(__name__)
 
+LLM_CONTEXT_MAX_ITEMS = 12
+DEMO_TOOL_NAMES = frozenset(
+    {
+        "search_demo_properties",
+        "get_inventory_summary",
+        "capture_customer_lead",
+        "switch_data_scope",
+    }
+)
+HISTORICAL_TOOL_NAMES = frozenset(
+    {
+        "search_historical_sales",
+        "get_market_insights",
+        "compare_areas",
+        "capture_customer_lead",
+        "switch_data_scope",
+    }
+)
+
+RECEPTIONIST_SYSTEM_PROMPT = textwrap.dedent(
+    """\
+    You are the friendly, professional Prime Properties Dubai receptionist and
+    property consultant. Speak naturally in the caller's current language:
+    English, Pakistani Urdu, or Arabic; English is the default.
+
+    Be concise. Use plain spoken language, ask one focused question at
+    a time, ask only for missing or ambiguous details, and do not repeat facts.
+    Avoid markdown, emojis, filler, and long introductions.
+
+    Search:
+    - Establish buy versus rent, then gather only useful filters: community,
+      property type, bedrooms, bathrooms, AED budget, furnishing, and
+      ready/off-plan preference. A sale budget is total price; a rent budget is
+      annual rent.
+    - When ready, call search_demo_properties. Lead with one result's key facts;
+      offer more. Use only returned facts. Omitted fields preserve preferences; use clear_* or
+      budget_scope="clear" when the caller removes a filter. Use min_bedrooms for
+      "or more" and a bedroom list for exact alternatives. "Anywhere in Dubai",
+      "any property type", and "show me anything" mean one broad search or
+      get_inventory_summary, not repeated community searches.
+    - For no results, name the criteria that failed and offer to relax one filter.
+      Never claim live availability.
+
+    Grounding:
+    - Demo tools use synthetic data. Say availability is simulated, not verified.
+      Sale prices and annual rents are AED; say which one you quote.
+      Never invent IDs, prices, features, amenities, addresses or contacts.
+      Do not invent property availability. This demo cannot verify live availability.
+    - The demo schema has no ready/off-plan field. Say that preference was
+      recorded but not applied; never invent an answer.
+    - Historical sales tools are available only for secondary-sales questions
+      about historical dataset records: use search_historical_sales,
+      get_market_insights, and compare_areas. These generated records are not
+      verified Dubai Land Department transactions, are
+      priced in USD, not AED, and are never current listings or proof of
+      availability.
+
+    Lead and privacy:
+    Offer an enquiry when appropriate, but interest or a phone number alone is not
+    consent. Call capture_customer_lead only after the caller explicitly agrees to save
+    the enquiry and confirms their name and phone number. Never invent contact
+    details or listing IDs; use IDs returned by search. After success say the demo
+    enquiry was registered; never claim success for a duplicate or error.
+
+    Language:
+    Stay in the current language until the caller clearly switches. Understand
+    Roman Urdu and reply in natural Pakistani Urdu; use Urdu script for Urdu
+    input. Treat hi/hi-IN and Devanagari as the existing Urdu compatibility case.
+    Never generate Hindi or Devanagari response text. Reply in Arabic script for
+    Arabic, preserving names, numbers, prices, addresses, and property details.
+    """
+)
+
 
 class Receptionist(Agent):
     """Prime Properties Dubai AI property sales consultant."""
@@ -32,110 +108,17 @@ class Receptionist(Agent):
         *,
         latency_recorder: LatencyRecorder | None = None,
         chat_ctx: ChatContext | None = None,
+        session_data: PropertySalesSessionData | None = None,
     ) -> None:
         database_path = default_database_path()
         self.sales_database = HistoricalSalesDatabase(database_path)
         self.property_database = DemoPropertyDatabase(database_path)
         self.lead_database = DemoLeadDatabase(database_path)
         self.latency_recorder = latency_recorder
+        self.session_data = session_data
+        self._acknowledged_speech_id: str | None = None
         super().__init__(
-            instructions=textwrap.dedent(
-                """\
-                You are the friendly, professional AI property sales consultant for
-                the Prime Properties Dubai demo.
-
-                Speak naturally and concisely. Welcome callers and ask one useful
-                follow-up question at a time. Do not interrogate callers with a
-                long checklist, and do not ask again for information they already
-                provided. Keep spoken replies to one or two sentences unless the
-                caller asks for more detail.
-
-                Conversation flow:
-                - Understand whether the caller wants to buy or rent.
-                - Collect their preferred Dubai community, property type, bedrooms,
-                  bathrooms when relevant, AED budget, furnishing preference, and
-                  ready or off-plan preference as they volunteer them.
-                - Treat a purchase budget as a total purchase price and a rental
-                  budget as an annual rental budget. Never silently mix them.
-                - Use search_demo_properties once there is enough information to
-                  search. Present up to three suitable results and use only the
-                  returned property details in follow-up answers.
-                - Omitted fields preserve preferences. Explicitly removed fields
-                  must be cleared: use budget_scope="clear", clear_community,
-                  clear_property_type, clear_bedrooms, or clear_furnishing.
-                  Use min_bedrooms for requests such as three or more bedrooms,
-                  and a list such as [2, 3] only when those exact counts are both
-                  acceptable.
-                - "Anywhere in Dubai", "any property type", "any bedroom count",
-                  and "show me anything" mean one broad search or an inventory
-                  summary, never several community-specific searches.
-                - Use get_inventory_summary when the caller asks what is in the
-                  system or asks to see something without useful filters.
-                - If there are no matches, explain which supplied criteria produced
-                  the empty result and offer to relax one filter. Do not say that
-                  properties are unavailable unless live inventory is verified.
-
-                Demo inventory rules:
-                - search_demo_properties searches only the demo_property_listings
-                  table. Its records are synthetic demo properties and availability
-                  is simulated, not verified live inventory.
-                - Demo sale prices and annual rental amounts are in AED. Clearly say
-                  whether a returned amount is a purchase price or annual rent.
-                - The current demo data has no ready/off-plan field. If asked about
-                  that preference, acknowledge it, explain that it was not applied
-                  to the search, and do not invent an answer.
-                - Never invent listing IDs, prices, amenities, building details,
-                  availability, owners, agents, addresses, or contact details.
-                  Do not invent property availability.
-                - Never claim that a simulated property is genuinely available.
-                  If asked for live availability, say that this demo can recommend
-                  simulated inventory but cannot verify live availability.
-
-                Lead capture rules:
-                - Offer to register an enquiry when appropriate, but do not save a
-                  lead merely because a caller mentioned a phone number.
-                - Before calling capture_customer_lead, ask for explicit permission
-                  to save the enquiry, repeat the customer's name and phone number,
-                  and obtain confirmation that both are correct.
-                - Call capture_customer_lead only when the caller has consented and
-                  confirmed the details. Never fabricate missing information.
-                - Use the selected listing IDs returned by search_demo_properties;
-                  do not create IDs yourself.
-                - After a successful result, confirm that the demo enquiry was
-                  registered. If the tool reports a duplicate or an error, explain
-                  that clearly without claiming success.
-
-                Historical sales tools are available for questions about the
-                secondary_sales.csv dataset. Those tools describe historical dataset records and
-                recorded dataset prices in USD, not current listings or
-                verified asking prices. The source documentation describes those
-                records as generated for analysis, not verified Dubai Land
-                Department transactions. Say USD for historical results and never
-                label them AED or use them to answer current availability questions.
-
-                Use plain spoken English without markdown, emojis, or lists.
-
-                Language behavior:
-                - Reply in the language used by the caller: English, Pakistani
-                  Urdu, or Arabic. Keep the current language until the caller
-                  clearly switches.
-                - Do not translate Urdu or Arabic into English unless the caller
-                  asks for a translation.
-                - For Roman Urdu, understand the caller's Latin-script Urdu and
-                  reply in natural Pakistani Urdu using the caller's script when
-                  practical. For Urdu-script input, reply in Urdu script.
-                - Hindi is temporarily disabled. If STT labels an Urdu turn as
-                  Hindi (hi or hi-IN), or presents the turn in Devanagari,
-                  treat it as Pakistani Urdu and reply only in Urdu script.
-                  Never generate Hindi or Devanagari response text for this
-                  application. Preserve the caller's original transcription;
-                  this rule controls the response language only.
-                - Reply in Arabic script for Arabic input, using clear UAE-
-                  appropriate conversational Arabic while preserving names,
-                  numbers, prices, addresses, and property details.
-                - Keep replies concise and natural for streaming voice output.
-                """
-            ),
+            instructions=RECEPTIONIST_SYSTEM_PROMPT,
             chat_ctx=chat_ctx,
         )
 
@@ -161,6 +144,172 @@ class Receptionist(Agent):
 
         async for frame in Agent.default.tts_node(self, text, model_settings):
             yield frame
+
+    async def llm_node(
+        self,
+        chat_ctx: ChatContext,
+        tools: list[Any],
+        model_settings: ModelSettings,
+    ) -> AsyncIterator[Any]:
+        """Generate from a bounded request context without changing session history.
+
+        The SDK reuses a preemptive generation only when the context and registered
+        tool set are unchanged.  Trimming a copy here keeps speculative LLM/TTS
+        generation eligible while preventing old turns from growing every request.
+        """
+
+        request_ctx = chat_ctx.copy()
+        request_ctx.truncate(max_items=LLM_CONTEXT_MAX_ITEMS)
+        if self.session_data is not None:
+            request_ctx.add_message(
+                role="developer",
+                content=self._compact_session_state(),
+            )
+
+        scoped_tools, tool_mode = self._tools_for_request(tools)
+        if self.latency_recorder is not None:
+            self.latency_recorder.record_metric(
+                stage="llm",
+                metric="request_context_items",
+                value=len(request_ctx.items),
+                unit="count",
+                source="receptionist.llm_node",
+                labels={
+                    "context_max_items": LLM_CONTEXT_MAX_ITEMS,
+                    "tool_mode": tool_mode,
+                    "tool_count": len(scoped_tools),
+                },
+            )
+
+        async for chunk in Agent.default.llm_node(
+            self,
+            request_ctx,
+            scoped_tools,
+            model_settings,
+        ):
+            yield chunk
+
+    def _compact_session_state(self) -> str:
+        """Return only non-PII state needed to preserve search continuity."""
+
+        state = self.session_data
+        if state is None:
+            return "Internal call state is unavailable; rely only on the conversation and tool results."
+
+        def value_or_unset(value: object) -> str:
+            if value is None or value == "":
+                return "unset"
+            if isinstance(value, list):
+                return ",".join(str(item) for item in value) or "unset"
+            return str(value).replace("\n", " ")
+
+        bedrooms = state.bedroom_counts or state.bedrooms or state.minimum_bedrooms
+        selected_ids = ",".join(state.selected_listing_ids[:3]) or "none"
+        demo_results = json.dumps(state.last_demo_results[:5], ensure_ascii=False)
+        return (
+            "Internal call state; do not mention this block. Preserve these filters "
+            "when the caller omits them: "
+            f"scope={value_or_unset(state.data_scope)}; "
+            f"intent={value_or_unset(state.transaction_intent)}; "
+            f"community={value_or_unset(state.preferred_community)}; "
+            f"type={value_or_unset(state.property_type)}; "
+            f"bedrooms={value_or_unset(bedrooms)}; "
+            f"bathrooms={value_or_unset(state.bathrooms)}; "
+            f"min_budget_aed={value_or_unset(state.minimum_budget_aed)}; "
+            f"max_budget_aed={value_or_unset(state.maximum_budget_aed)}; "
+            f"furnishing={value_or_unset(state.furnishing_preference)}; "
+            f"ready_or_offplan={value_or_unset(state.ready_or_offplan_preference)}; "
+            f"selected_listing_ids={selected_ids}."
+            + (
+                f" Last demo results: {demo_results}."
+                if state.last_demo_results and state.data_scope == "demo"
+                else ""
+            )
+        )
+
+    def _tools_for_request(self, tools: list[Any]) -> tuple[list[Any], str]:
+        """Use a successful tool's scope to reduce later schemas safely.
+
+        The first request keeps all tools available so the LLM remains responsible
+        for interpreting whether the caller wants demo inventory or historical
+        analysis.  A tool scope is narrowed only after application code records a
+        successful data operation; no lexical intent classifier is used.
+        """
+
+        scope = self.session_data.data_scope if self.session_data is not None else None
+        if scope == "demo":
+            allowed = DEMO_TOOL_NAMES
+            tool_mode = "demo"
+        elif scope == "historical":
+            allowed = HISTORICAL_TOOL_NAMES
+            tool_mode = "historical"
+        else:
+            return tools, "all"
+
+        scoped_tools = [tool for tool in tools if self._tool_name(tool) in allowed]
+        if not scoped_tools:
+            return tools, "all"
+        return scoped_tools, tool_mode
+
+    @staticmethod
+    def _tool_name(tool: Any) -> str | None:
+        info = getattr(tool, "info", None)
+        name = getattr(info, "name", None)
+        if isinstance(name, str):
+            return name
+        tool_id = getattr(tool, "id", None)
+        return tool_id if isinstance(tool_id, str) else None
+
+    @asynccontextmanager
+    async def _search_acknowledgement(
+        self, context: RunContext[PropertySalesSessionData]
+    ) -> AsyncIterator[None]:
+        """Offer a cancellable, single acknowledgement only while a lookup waits."""
+        with_filler = getattr(context, "with_filler", None)
+        speech_id = getattr(getattr(context, "speech_handle", None), "id", None)
+        if not callable(with_filler) or not speech_id:
+            yield
+            return
+
+        phrases = {"en": "Let me check.", "ur": "میں دیکھتی ہوں", "ar": "دعني أتحقق."}
+
+        filler_handle: Any = None
+
+        def acknowledgement(_step: int) -> Any:
+            nonlocal filler_handle
+            if (
+                self._acknowledged_speech_id == speech_id
+                or context.speech_handle.interrupted
+            ):
+                return None
+            self._acknowledged_speech_id = speech_id
+            language = getattr(context.userdata, "preferred_language", "en")
+            filler_handle = context.session.say(
+                phrases.get(language, phrases["en"]),
+                allow_interruptions=True,
+                add_to_chat_ctx=False,
+            )
+            if self.latency_recorder is not None:
+                self.latency_recorder.record_metric(
+                    stage="agent_speech",
+                    metric="search_acknowledgement_requested",
+                    value=1,
+                    unit="event",
+                    source="receptionist.search_filler",
+                    speech_id=speech_id,
+                    labels={
+                        "language_code": language,
+                        "acknowledgement_speech_id": getattr(filler_handle, "id", None),
+                    },
+                )
+            return filler_handle
+
+        try:
+            async with with_filler(acknowledgement, delay=0.15, max_steps=1):
+                yield
+        finally:
+            if filler_handle is not None and not filler_handle.done():
+                filler_handle.interrupt()
 
     @staticmethod
     def _context_ids(context: RunContext[Any]) -> tuple[str | None, str | None]:
@@ -338,7 +487,8 @@ class Receptionist(Agent):
         clear_furnishing: bool = False,
         clear_property_type: bool = False,
         clear_bedrooms: bool = False,
-    ) -> dict[str, Any]:
+        brief_result_requested: bool = False,
+    ) -> dict[str, Any] | ToolResult:
         """Search synthetic demo properties using the caller's preferences.
 
         Use this for simulated demo inventory after the caller's buy-or-rent
@@ -354,8 +504,11 @@ class Receptionist(Agent):
         anywhere in Dubai, set clear_community to true. Use clear_property_type
         or clear_bedrooms when the caller removes those constraints. If the
         caller says either furnishing, set clear_furnishing to true. Omitted
-        fields preserve existing call preferences. The demo schema has no
-        ready/off-plan field.
+        fields preserve existing call preferences. Limit must be between 1 and 5.
+        The demo schema has no
+        ready/off-plan field. Set brief_result_requested true only when the caller
+        wants a simple first option and has not asked for multiple listings,
+        specific additional details, comparisons, or a different answer format.
         """
         tool_name = "search_demo_properties"
         execution_started = self._tool_stage_start(
@@ -532,9 +685,10 @@ class Receptionist(Agent):
 
             query_started = self._tool_stage_start(context, "database_query", tool_name)
             try:
-                result, query_metrics = await self._run_property_tool(
-                    self.property_database.search_normalized, request
-                )
+                async with self._search_acknowledgement(context):
+                    result, query_metrics = await self._run_property_tool(
+                        self.property_database.search_normalized, request
+                    )
             except ToolError:
                 self._tool_stage_end(
                     context,
@@ -626,6 +780,135 @@ class Receptionist(Agent):
             self._tool_stage_end(
                 context, "tool_result_returned", tool_name, returned_started
             )
+            context.userdata.data_scope = "demo"
+            fast_enabled = configured_fast_property_results()
+            context.userdata.last_demo_results = (
+                [
+                    {
+                        key: row.get(key)
+                        for key in (
+                            "listing_id",
+                            "property_type",
+                            "community",
+                            "bedrooms",
+                            "bathrooms",
+                            "area_sqft",
+                            "price_aed",
+                            "currency",
+                            "price_period",
+                            "furnishing",
+                            "view_type",
+                            "availability_status",
+                        )
+                    }
+                    for row in result.get("results", [])
+                    if isinstance(row, dict)
+                ][:5]
+                if fast_enabled
+                else []
+            )
+            if fast_enabled and brief_result_requested is True:
+                language = context.userdata.preferred_language
+                spoken = render_demo_result(result, language)
+                speech_handle = getattr(context, "speech_handle", None)
+                session = getattr(context, "session", None)
+                if (
+                    spoken
+                    and speech_handle
+                    and not speech_handle.interrupted
+                    and session
+                ):
+                    caller_revision = context.userdata.caller_activity_revision
+                    try:
+                        reply_handle = session.say(
+                            spoken, allow_interruptions=True, add_to_chat_ctx=True
+                        )
+                    except Exception:
+                        logger.exception("Fast property speech could not be scheduled")
+                    else:
+
+                        def cancel_if_interrupted(parent: Any) -> None:
+                            if parent.interrupted and not reply_handle.done():
+                                reply_handle.interrupt()
+
+                        if reply_handle is not None and callable(
+                            getattr(speech_handle, "add_done_callback", None)
+                        ):
+                            speech_handle.add_done_callback(cancel_if_interrupted)
+                        if reply_handle is not None and callable(
+                            getattr(reply_handle, "add_done_callback", None)
+                        ):
+
+                            def record_reply_failure(handle: Any) -> None:
+                                if handle.interrupted or handle.exception() is None:
+                                    return
+                                logger.error(
+                                    "Fast property speech failed after scheduling"
+                                )
+                                self._record_tool_value(
+                                    context,
+                                    "fast_property_reply_failed",
+                                    1,
+                                    "event",
+                                    tool_name,
+                                    labels={
+                                        "reply_speech_id": getattr(handle, "id", None)
+                                    },
+                                )
+                                # A new caller utterance invalidates any recovery.
+                                if (
+                                    speech_handle.interrupted
+                                    or context.userdata.caller_activity_revision
+                                    != caller_revision
+                                    or getattr(session, "user_state", None)
+                                    != "listening"
+                                    or getattr(session, "current_speech", None)
+                                    not in (None, handle)
+                                ):
+                                    self._record_tool_value(
+                                        context,
+                                        "fast_property_recovery_suppressed",
+                                        1,
+                                        "event",
+                                        tool_name,
+                                    )
+                                    return
+                                apologies = {
+                                    "en": "Sorry, there was an audio problem. Please ask me again.",
+                                    "ur": "معذرت، آواز میں مسئلہ ہوا. براہ کرم دوبارہ پوچھیں",
+                                    "ar": "عذراً، حدثت مشكلة في الصوت. يرجى السؤال مرة أخرى.",
+                                }
+                                try:
+                                    session.say(
+                                        apologies.get(language, apologies["en"]),
+                                        allow_interruptions=True,
+                                        add_to_chat_ctx=False,
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "Fast property recovery speech could not be scheduled"
+                                    )
+                                else:
+                                    self._record_tool_value(
+                                        context,
+                                        "fast_property_recovery_scheduled",
+                                        1,
+                                        "event",
+                                        tool_name,
+                                    )
+
+                            reply_handle.add_done_callback(record_reply_failure)
+                        self._record_tool_value(
+                            context,
+                            "fast_property_reply_scheduled",
+                            1,
+                            "event",
+                            tool_name,
+                            labels={
+                                "reply_speech_id": getattr(reply_handle, "id", None)
+                            },
+                        )
+                        return ToolResult(result, reply_required=False)
             return result
         except ToolError:
             self._tool_stage_end(
@@ -676,9 +959,10 @@ class Receptionist(Agent):
         try:
             query_started = self._tool_stage_start(context, "database_query", tool_name)
             try:
-                result = await self._run_property_tool(
-                    self.property_database.inventory_summary
-                )
+                async with self._search_acknowledgement(context):
+                    result = await self._run_property_tool(
+                        self.property_database.inventory_summary
+                    )
             except ToolError:
                 self._tool_stage_end(
                     context,
@@ -716,6 +1000,7 @@ class Receptionist(Agent):
             self._tool_stage_end(
                 context, "tool_result_returned", tool_name, returned_started
             )
+            context.userdata.data_scope = "demo"
             return result
         except ToolError:
             self._tool_stage_end(
@@ -807,6 +1092,28 @@ class Receptionist(Agent):
         )
 
     @function_tool(flags=ToolFlag.IGNORE_ON_ENTER)
+    async def switch_data_scope(
+        self,
+        context: RunContext[PropertySalesSessionData],
+        data_scope: str,
+    ) -> str:
+        """Switch between synthetic demo inventory and historical analysis.
+
+        Use this only when the caller explicitly changes data domains. Pass
+        exactly "demo" for synthetic sale/rent listings or "historical" for
+        historical secondary-sales analysis, then call the relevant data tool.
+        """
+
+        normalized_scope = data_scope.strip().casefold()
+        if normalized_scope not in {"demo", "historical"}:
+            raise ToolError('data_scope must be "demo" or "historical"')
+        if normalized_scope == "demo":
+            context.userdata.data_scope = "demo"
+            return "Demo inventory scope selected. Continue with the requested synthetic listing search."
+        context.userdata.data_scope = "historical"
+        return "Historical scope selected. Continue with the requested historical sales tool."
+
+    @function_tool(flags=ToolFlag.IGNORE_ON_ENTER)
     async def search_historical_sales(
         self,
         context: RunContext,
@@ -826,8 +1133,7 @@ class Receptionist(Agent):
         in spoken replies and do not convert currencies. The area may be a
         community or zone. Never use this tool to claim current availability.
         """
-        del context
-        return await self._run_sales_tool(
+        result = await self._run_sales_tool(
             self.sales_database.search,
             area=area,
             property_type=property_type,
@@ -838,6 +1144,9 @@ class Receptionist(Agent):
             end_date=end_date,
             limit=limit,
         )
+        if isinstance(context.userdata, PropertySalesSessionData):
+            context.userdata.data_scope = "historical"
+        return result
 
     @function_tool(flags=ToolFlag.IGNORE_ON_ENTER)
     async def get_market_insights(
@@ -856,8 +1165,7 @@ class Receptionist(Agent):
         are recorded in USD; say USD and do not convert them. This tool cannot
         report live inventory.
         """
-        del context
-        return await self._run_sales_tool(
+        result = await self._run_sales_tool(
             self.sales_database.market_insights,
             area=area,
             property_type=property_type,
@@ -866,6 +1174,9 @@ class Receptionist(Agent):
             end_date=end_date,
             granularity=granularity,
         )
+        if isinstance(context.userdata, PropertySalesSessionData):
+            context.userdata.data_scope = "historical"
+        return result
 
     @function_tool(flags=ToolFlag.IGNORE_ON_ENTER)
     async def compare_areas(
@@ -884,8 +1195,7 @@ class Receptionist(Agent):
         USD and do not convert them. Do not infer current inventory or asking
         prices from the result.
         """
-        del context
-        return await self._run_sales_tool(
+        result = await self._run_sales_tool(
             self.sales_database.compare_areas,
             area_a=area_a,
             area_b=area_b,
@@ -894,3 +1204,6 @@ class Receptionist(Agent):
             start_date=start_date,
             end_date=end_date,
         )
+        if isinstance(context.userdata, PropertySalesSessionData):
+            context.userdata.data_scope = "historical"
+        return result

@@ -13,14 +13,18 @@ scenarios:
     instructions: |
       PERSONA: You are a concise English-speaking caller. Speak at a normal pace
       in a quiet room and answer one question at a time.
-      OPENING LINE: "Hi, I am looking for a property in Dubai."
+      OPENING LINE: "English."
+      AFTER LANGUAGE SELECTION: "Hi, I am looking for a property in Dubai."
       DO, IN ORDER:
-      1. Wait for the receptionist to clarify whether you want to buy or rent.
-      2. Answer only the clarification question, then end the call politely.
+      1. Answer the single welcome language prompt with "English."
+      2. After the handoff, say the property request above.
+      3. Wait for the receptionist to clarify whether you want to buy or rent.
+      4. Answer only the clarification question, then end the call politely.
     agent_expectations: >
-      The receptionist responds naturally, asks whether the caller wants to buy
-      or rent, and does not invent a property recommendation before the intent
-      is known.
+      The receptionist first asks which language the caller prefers, then after
+      the caller selects English hands off and naturally asks whether the caller
+      wants to buy or rent. It does not invent a property recommendation before
+      the intent is known.
     tags:
       feature: latency_benchmark
       scenario_type: greeting_clarification
@@ -34,13 +38,16 @@ scenarios:
     instructions: |
       PERSONA: You are an English-speaking caller in a quiet room. Speak at a
       normal pace and volunteer the requirements in the opening line.
-      OPENING LINE: "I want to rent a two-bedroom apartment in Dubai Marina for
-      up to 140,000 AED per year."
+      OPENING LINE: "English."
+      AFTER LANGUAGE SELECTION: "I want to rent a two-bedroom apartment in Dubai
+      Marina for up to 140,000 AED per year."
       DO, IN ORDER:
-      1. Answer one follow-up question if the receptionist asks for a missing
+      1. Answer the single welcome language prompt with "English."
+      2. After the handoff, give the rental request above.
+      3. Answer one follow-up question if the receptionist asks for a missing
          search detail.
-      2. Do not add a second request or ask for historical market statistics.
-      3. End after the receptionist presents the search result.
+      4. Do not add a second request or ask for historical market statistics.
+      5. End after the receptionist presents the search result.
     agent_expectations: >
       The receptionist performs one focused demo-property search using the
       caller's rental, Dubai Marina, two-bedroom, and annual-budget constraints;
@@ -59,11 +66,15 @@ scenarios:
     instructions: |
       PERSONA: You are an English-speaking caller in a quiet room. Speak at a
       normal pace and keep the request unchanged.
-      OPENING LINE: "I want to buy a six-bedroom apartment in Al Barsha for 1 AED."
+      OPENING LINE: "English."
+      AFTER LANGUAGE SELECTION: "I want to buy a six-bedroom apartment in Al
+      Barsha for 1 AED."
       DO, IN ORDER:
-      1. Answer any clarification question with the same requirements.
-      2. Do not relax a filter unless the receptionist asks which one to relax.
-      3. End after the receptionist explains the result.
+      1. Answer the single welcome language prompt with "English."
+      2. After the handoff, give the purchase request above.
+      3. Answer any clarification question with the same requirements.
+      4. Do not relax a filter unless the receptionist asks which one to relax.
+      5. End after the receptionist explains the result.
     agent_expectations: >
       The receptionist reports that the supplied demo search returned no
       matches, identifies the relevant constraints, offers to relax a filter,
@@ -81,13 +92,16 @@ scenarios:
     instructions: |
       PERSONA: You are an English-speaking caller in a quiet room. Speak at a
       normal pace and correct yourself once.
-      OPENING LINE: "I am looking to rent a one-bedroom apartment in Jumeirah
-      Village Circle for 80,000 AED a year."
+      OPENING LINE: "English."
+      AFTER LANGUAGE SELECTION: "I am looking to rent a one-bedroom apartment in
+      Jumeirah Village Circle for 80,000 AED a year."
       DO, IN ORDER:
-      1. After the receptionist acknowledges the rental request, say: "Actually,
+      1. Answer the single welcome language prompt with "English."
+      2. After the handoff, give the rental request above.
+      3. After the receptionist acknowledges the rental request, say: "Actually,
          I want to buy, not rent. My purchase budget is 900,000 AED."
-      2. Keep the one-bedroom and community preferences unchanged.
-      3. End after the receptionist acknowledges the corrected intent or returns
+      4. Keep the one-bedroom and community preferences unchanged.
+      5. End after the receptionist acknowledges the corrected intent or returns
          a result.
     agent_expectations: >
       The final search state uses sale intent and a purchase budget, not the
@@ -106,12 +120,15 @@ scenarios:
     instructions: |
       PERSONA: You are an English-speaking caller in a quiet room. Speak at a
       normal pace and explicitly remove one previously supplied preference.
-      OPENING LINE: "I want to buy an apartment in Dubai Hills with a budget of
-      2,000,000 AED."
+      OPENING LINE: "English."
+      AFTER LANGUAGE SELECTION: "I want to buy an apartment in Dubai Hills with a
+      budget of 2,000,000 AED."
       DO, IN ORDER:
-      1. Answer any clarification question without adding a new budget.
-      2. Then say: "Please remove the budget and search without a price limit."
-      3. End after the receptionist confirms the updated request or returns a
+      1. Answer the single welcome language prompt with "English."
+      2. After the handoff, give the purchase request above.
+      3. Answer any clarification question without adding a new budget.
+      4. Then say: "Please remove the budget and search without a price limit."
+      5. End after the receptionist confirms the updated request or returns a
          result.
     agent_expectations: >
       The receptionist treats the second instruction as an explicit budget
@@ -130,14 +147,17 @@ scenarios:
     instructions: |
       PERSONA: You are an English-speaking caller in a quiet room. Speak at a
       normal pace and listen for the complete answer.
-      OPENING LINE: "Show me several simulated sale apartments in Dubai under
-      3,000,000 AED, with no community preference."
+      OPENING LINE: "English."
+      AFTER LANGUAGE SELECTION: "Show me several simulated sale apartments in
+      Dubai under 3,000,000 AED, with no community preference."
       DO, IN ORDER:
-      1. If asked to clarify, repeat that any Dubai community is acceptable and
+      1. Answer the single welcome language prompt with "English."
+      2. After the handoff, give the sale request above.
+      3. If asked to clarify, repeat that any Dubai community is acceptable and
          the maximum purchase budget is 3,000,000 AED.
-      2. Ask the receptionist to give the key details for several returned
+      4. Ask the receptionist to give the key details for several returned
          properties, one after another.
-      3. End after the receptionist finishes the response.
+      5. End after the receptionist finishes the response.
     agent_expectations: >
       The receptionist uses the demo inventory search, gives only details that
       came from returned records, labels the inventory as synthetic or simulated,

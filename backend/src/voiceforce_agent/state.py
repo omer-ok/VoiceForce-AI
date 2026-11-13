@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+DataScope = Literal["demo", "historical"]
 
 
 @dataclass
@@ -19,6 +21,7 @@ class PropertySalesSessionData:
     selection_pending: bool = False
     preferred_language: str = "en"
     last_detected_language: str | None = None
+    caller_activity_revision: int = 0
     language_confidence: float | None = None
     transaction_intent: str | None = None
     preferred_community: str | None = None
@@ -33,6 +36,10 @@ class PropertySalesSessionData:
     furnishing_preference: str | None = None
     ready_or_offplan_preference: str | None = None
     selected_listing_ids: list[str] = field(default_factory=list)
+    last_demo_results: list[dict[str, Any]] = field(default_factory=list)
+    # Set only after a successful data tool call.  This lets later requests use
+    # a smaller tool schema without guessing the meaning of the caller's words.
+    data_scope: DataScope | None = None
 
     def update_from_search(
         self, filters: dict[str, Any], listing_ids: list[str] | None = None

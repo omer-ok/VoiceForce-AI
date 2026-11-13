@@ -27,6 +27,9 @@ _TURN_METRICS = {
     "database_connection_duration": "database_connection_duration",
     "sql_execution_duration": "sql_execution_duration",
     "database_query_duration": "database_query_duration",
+    "speech_interrupted": "speech_interrupted",
+    "slow_response": "slow_response",
+    "caller_speech_end_to_remote_signal": "caller_speech_end_to_remote_signal",
 }
 
 _REQUIRED_STAGES = {
@@ -52,15 +55,11 @@ def filter_records(
     speech_ids: set[str] | None = None,
     room_names: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Filter without mutating or rewriting the source records."""
+    """Filter by session, then retain records linked to selected turn/speech IDs."""
 
     selected: list[dict[str, Any]] = []
     for record in records:
         if session_ids and str(record.get("session_id")) not in session_ids:
-            continue
-        if turn_ids and str(record.get("turn_id")) not in turn_ids:
-            continue
-        if speech_ids and str(record.get("speech_id")) not in speech_ids:
             continue
         if room_names:
             labels = record.get("labels")
@@ -70,6 +69,29 @@ def filter_records(
             if record_room not in room_names and report_room not in room_names:
                 continue
         selected.append(dict(record))
+    if turn_ids or speech_ids:
+        by_node: defaultdict[tuple[str, str, str, str], list[int]] = defaultdict(list)
+        for index, record in enumerate(selected):
+            for node in _correlation_nodes(record):
+                by_node[node].append(index)
+        pending = [
+            index for index, record in enumerate(selected)
+            if (not turn_ids or str(record.get("turn_id")) in turn_ids)
+            and (not speech_ids or str(record.get("speech_id")) in speech_ids)
+        ]
+        included = set(pending)
+        visited: set[tuple[str, str, str, str]] = set()
+        while pending:
+            index = pending.pop()
+            for node in _correlation_nodes(selected[index]):
+                if node in visited:
+                    continue
+                visited.add(node)
+                for linked in by_node[node]:
+                    if linked not in included:
+                        included.add(linked)
+                        pending.append(linked)
+        selected = [record for index, record in enumerate(selected) if index in included]
     return selected
 
 
@@ -136,6 +158,7 @@ def _timeline_record(record: Mapping[str, Any]) -> dict[str, Any]:
             "available",
             "missing_reason",
             "source",
+            "session_id",
             "turn_id",
             "speech_id",
             "request_id",
@@ -155,91 +178,173 @@ def _turn_key(record: Mapping[str, Any]) -> tuple[str, str | None]:
     return ("unlinked", None)
 
 
-def build_turn_diagnostics(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _correlation_nodes(record: Mapping[str, Any]) -> list[tuple[str, str, str, str]]:
+    session = str(record.get("session_id") or "unknown")
+    clock = str(record.get("clock_domain") or "unknown")
+    fields = [("turn", record.get("turn_id")), ("speech", record.get("speech_id"))]
+    if record.get("stage") == "tool" or record.get("metric") == "speech_tool_link":
+        fields.append(("call", record.get("request_id")))
+    labels = record.get("labels")
+    if isinstance(labels, Mapping):
+        if record.get("metric") == "fast_property_reply_scheduled":
+            fields.append(("speech", labels.get("reply_speech_id")))
+        elif record.get("metric") == "search_acknowledgement_requested":
+            fields.append(("speech", labels.get("acknowledgement_speech_id")))
+    return [(session, clock, kind, str(value)) for kind, value in fields if value]
+
+
+def build_turn_diagnostics(
+    records: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
     """Build diagnostics only from explicit IDs; never infer cross-domain turns."""
 
-    groups: defaultdict[tuple[str, str | None], list[Mapping[str, Any]]] = defaultdict(list)
-    for record in records:
-        if record.get("record_type", "metric") != "metric":
-            continue
-        key, _ = _turn_key(record)
-        if key != "unlinked":
-            groups[_turn_key(record)].append(record)
+    items = [
+        record for record in records if record.get("record_type", "metric") == "metric"
+    ]
+    parents: dict[tuple[str, str, str, str], tuple[str, str, str, str]] = {}
+
+    def root(node: tuple[str, str, str, str]) -> tuple[str, str, str, str]:
+        parents.setdefault(node, node)
+        while parents[node] != node:
+            node = parents[node]
+        return node
+
+    for record in items:
+        identifiers = _correlation_nodes(record)
+        if identifiers:
+            first = root(identifiers[0])
+            for other in identifiers[1:]:
+                parents[root(other)] = root(first)
+
+    grouped_records: defaultdict[tuple[str, str, str, str], list[Mapping[str, Any]]] = (
+        defaultdict(list)
+    )
+    for record in items:
+        identifiers = _correlation_nodes(record)
+        if identifiers:
+            grouped_records[root(identifiers[0])].append(record)
 
     diagnostics: list[dict[str, Any]] = []
-    for (key, speech_id), grouped in sorted(
-        groups.items(), key=lambda item: (item[0][0], item[0][1] or "")
-    ):
-        turn_id = next(
-            (record.get("turn_id") for record in grouped if record.get("turn_id")),
-            None,
-        )
-        speech_id = speech_id or next(
-            (str(record.get("speech_id")) for record in grouped if record.get("speech_id")),
-            None,
-        )
-        available_metrics: dict[str, Any] = {}
-        for record in grouped:
-            if record.get("available") is not False and record.get("value") is not None:
-                available_metrics[str(record.get("metric"))] = record.get("value")
-
-        stages: dict[str, dict[str, Any]] = {}
-        for stage, metric_names in _REQUIRED_STAGES.items():
-            match = next(
-                (
-                    record
-                    for record in grouped
-                    if record.get("metric") in metric_names
-                    and record.get("available") is not False
-                    and record.get("value") is not None
-                ),
-                None,
+    for root_id, grouped in sorted(grouped_records.items()):
+        turn_ids = list(
+            dict.fromkeys(
+                record.get("turn_id")
+                for record in grouped
+                if record.get("turn_id") and record.get("stage") == "agent_turn"
             )
-            if match is None:
-                stages[stage] = {"available": False, "value": None}
-            else:
-                stages[stage] = {
-                    "available": True,
-                    "value": match.get("value"),
-                    "unit": match.get("unit"),
-                    "source": match.get("source"),
-                    "measurement": "duration"
-                    if match.get("metric") in _TURN_METRICS.values()
-                    else "event_or_timestamp",
-                }
-
-        diagnostics.append(
-            {
-                "key": key,
-                "turn_id": turn_id,
-                "speech_id": speech_id,
-                "metrics": {
-                    public_name: available_metrics.get(raw_name)
-                    for public_name, raw_name in _TURN_METRICS.items()
-                },
-                "stages": stages,
-                "missing_stages": [
-                    stage for stage, result in stages.items() if not result["available"]
-                ],
-                "backend_timeline": [
-                    _timeline_record(record)
-                    for record in sorted(
-                        grouped,
-                        key=lambda record: float(record.get("monotonic_seconds", 0.0)),
-                    )
-                    if record.get("clock_domain") == "backend_process"
-                ],
-                "browser_timeline": [
-                    _timeline_record(record)
-                    for record in sorted(
-                        grouped,
-                        key=lambda record: float(record.get("monotonic_ms", 0.0)),
-                    )
-                    if record.get("clock_domain") == "browser_performance"
-                ],
-            }
         )
+        if not turn_ids:
+            turn_ids = [
+                next(
+                    (
+                        record.get("turn_id")
+                        for record in grouped
+                        if record.get("turn_id")
+                    ),
+                    None,
+                )
+            ]
+        for turn_id in turn_ids:
+            turn_records = [
+                record
+                for record in grouped
+                if not record.get("turn_id") or record.get("turn_id") == turn_id
+            ]
+            diagnostics.append(
+                _build_diagnostic(root_id, grouped, turn_records, turn_id)
+            )
     return diagnostics
+
+
+def _build_diagnostic(
+    root_id: tuple[str, str, str, str],
+    grouped: list[Mapping[str, Any]],
+    turn_records: list[Mapping[str, Any]],
+    turn_id: Any,
+) -> dict[str, Any]:
+    speech_id = next(
+        (
+            str(record.get("speech_id"))
+            for record in grouped
+            if record.get("turn_id") == turn_id and record.get("speech_id")
+        ),
+        next(
+            (
+                str(record.get("speech_id"))
+                for record in grouped
+                if record.get("speech_id")
+            ),
+            None,
+        ),
+    )
+    key = (
+        f"turn:{turn_id}"
+        if turn_id
+        else f"speech:{speech_id}"
+        if speech_id
+        else f"call:{root_id[3]}"
+    )
+    available_metrics: dict[str, Any] = {}
+    for record in turn_records:
+        if record.get("available") is not False and record.get("value") is not None:
+            available_metrics[str(record.get("metric"))] = record.get("value")
+
+    stages: dict[str, dict[str, Any]] = {}
+    for stage, metric_names in _REQUIRED_STAGES.items():
+        match = next(
+            (
+                record
+                for record in turn_records
+                if record.get("metric") in metric_names
+                and record.get("available") is not False
+                and record.get("value") is not None
+            ),
+            None,
+        )
+        if match is None:
+            stages[stage] = {"available": False, "value": None}
+        else:
+            stages[stage] = {
+                "available": True,
+                "value": match.get("value"),
+                "unit": match.get("unit"),
+                "source": match.get("source"),
+                "measurement": "duration"
+                if match.get("metric") in _TURN_METRICS.values()
+                else "event_or_timestamp",
+            }
+
+    return {
+        "key": key,
+        "session_id": root_id[0],
+        "clock_domain": root_id[1],
+        "turn_id": turn_id,
+        "speech_id": speech_id,
+        "metrics": {
+            public_name: available_metrics.get(raw_name)
+            for public_name, raw_name in _TURN_METRICS.items()
+        },
+        "stages": stages,
+        "missing_stages": [
+            stage for stage, result in stages.items() if not result["available"]
+        ],
+        "backend_timeline": [
+            _timeline_record(record)
+            for record in sorted(
+                grouped,
+                key=lambda record: float(record.get("monotonic_seconds", 0.0)),
+            )
+            if record.get("clock_domain") == "backend_process"
+        ],
+        "browser_timeline": [
+            _timeline_record(record)
+            for record in sorted(
+                grouped,
+                key=lambda record: float(record.get("monotonic_ms", 0.0)),
+            )
+            if record.get("clock_domain") == "browser_performance"
+        ],
+    }
 
 
 def build_report(
@@ -262,6 +367,12 @@ def build_report(
         "observation_counts": observation_counts(records),
         "metrics": aggregate_metric_records(records),
         "metrics_by_scope": aggregate_by_scope(records),
+        "slow_responses": [
+            _timeline_record(record)
+            for record in records
+            if record.get("metric") == "slow_response"
+            and record.get("available") is not False
+        ],
     }
     if include_diagnostics:
         report["turn_diagnostics"] = build_turn_diagnostics(records)

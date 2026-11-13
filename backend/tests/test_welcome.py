@@ -4,8 +4,7 @@ import pytest
 
 from voiceforce_agent.state import PropertySalesSessionData
 from voiceforce_agent.welcome import (
-    LANGUAGE_SELECTION_PROMPTS,
-    WELCOME_INTRODUCTIONS,
+    WELCOME_PROMPT,
     LanguageSelectionAgent,
     WelcomeCoordinator,
     normalize_language_selection,
@@ -35,6 +34,11 @@ class FakeSession:
         }
         self.spoken.append(text)
         return FakeSpeechHandle()
+
+
+class ClosingSession(FakeSession):
+    def say(self, text: str, **kwargs: object) -> FakeSpeechHandle:
+        raise RuntimeError("AgentSession is closing, cannot use say()")
 
 
 class FakeRouter:
@@ -75,14 +79,8 @@ async def test_welcome_sequence_is_ordered_and_runs_only_once() -> None:
     assert await coordinator.run() is True
     assert await coordinator.run() is False
 
-    expected_text = [text for _, _, text in WELCOME_INTRODUCTIONS] + [
-        text for _, text in LANGUAGE_SELECTION_PROMPTS
-    ]
-    expected_languages = [language for language, _, _ in WELCOME_INTRODUCTIONS] + [
-        language for language, _ in LANGUAGE_SELECTION_PROMPTS
-    ]
-    assert session.spoken == expected_text
-    assert router.languages == expected_languages
+    assert session.spoken == [WELCOME_PROMPT]
+    assert router.languages == ["en"]
     assert session.userdata.welcome_sequence_started is True
     assert session.userdata.welcome_sequence_completed is True
     assert session.userdata.selection_pending is True
@@ -101,6 +99,26 @@ async def test_welcome_sequence_is_ordered_and_runs_only_once() -> None:
         )
         == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_welcome_sequence_ends_cleanly_when_session_is_closing() -> None:
+    session = ClosingSession()
+    recorder = RecordingRecorder()
+
+    result = await WelcomeCoordinator(
+        session,
+        FakeRouter(),
+        recorder=recorder,
+    ).run()
+
+    assert result is False
+    assert session.userdata.welcome_sequence_started is True
+    assert session.userdata.welcome_sequence_completed is False
+    assert [metric["metric"] for metric in recorder.metrics] == [
+        "welcome_sequence_started",
+        "welcome_sequence_cancelled",
+    ]
 
 
 @pytest.mark.parametrize(

@@ -12,12 +12,26 @@ from typing import Any
 import duckdb
 import pandas as pd
 
+from voiceforce_agent.property_records import (
+    CANONICAL_COLUMNS,
+    DEMO_RECORD_KIND,
+    DEMO_SOURCE_TABLE,
+    canonical_frame_from_demo,
+    create_compatibility_views,
+    create_property_records_table,
+    object_type,
+    validate_property_records,
+)
 from voiceforce_agent.sales_data import default_database_path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CSV_PATH = BACKEND_ROOT / "data" / "demo_property_listings.csv"
+DEFAULT_BACKUP_PATH = (
+    BACKEND_ROOT / "data" / "backups" / "demo_property_listings.before_seed.csv"
+)
 DEFAULT_SEED = 20251105
-DEFAULT_COUNT = 100
+DEFAULT_COUNT = 500
+DEFAULT_LISTING_TYPE_COUNTS = {"sale": 250, "rent": 250}
 
 COMMUNITIES = (
     "Dubai Marina",
@@ -135,6 +149,8 @@ REQUIRED_FIELDS = (
     "created_date",
 )
 
+DEMO_MARKER = "synthetic_demo"
+
 
 def _slug(value: str) -> str:
     return re.sub(r"[^A-Z0-9]+", "-", value.upper()).strip("-")
@@ -237,7 +253,7 @@ def _generate_record(rng: random.Random, index: int) -> dict[str, Any]:
         "amenities": amenities,
         "description": description,
         "currency": "AED",
-        "source_type": "synthetic_demo",
+        "source_type": DEMO_MARKER,
         "is_synthetic": True,
         "demo_data_notice": DEMO_DATA_NOTICE,
         "created_date": created_date.isoformat(),
@@ -245,10 +261,26 @@ def _generate_record(rng: random.Random, index: int) -> dict[str, Any]:
 
 
 def validate_listings(
-    listings: list[dict[str, Any]], expected_count: int | None = None
+    listings: list[dict[str, Any]],
+    expected_count: int | None = None,
+    expected_listing_type_counts: dict[str, int] | None = None,
 ) -> None:
     if expected_count is not None and len(listings) != expected_count:
         raise ValueError(f"expected {expected_count} listings, got {len(listings)}")
+
+    if expected_listing_type_counts is not None:
+        actual_listing_type_counts = {
+            listing_type: sum(
+                listing["listing_type"] == listing_type for listing in listings
+            )
+            for listing_type in expected_listing_type_counts
+        }
+        if actual_listing_type_counts != expected_listing_type_counts:
+            raise ValueError(
+                "listing type counts do not match the expected distribution: "
+                f"expected {expected_listing_type_counts}, "
+                f"got {actual_listing_type_counts}"
+            )
 
     listing_ids = [listing.get("listing_id") for listing in listings]
     if len(set(listing_ids)) != len(listing_ids):
@@ -274,7 +306,7 @@ def validate_listings(
             raise ValueError("price_per_sqft_aed does not match price_aed / area_sqft")
         if listing["currency"] != "AED":
             raise ValueError("demo listing prices must use AED")
-        if listing["source_type"] != "synthetic_demo":
+        if listing["source_type"] != DEMO_MARKER:
             raise ValueError("source_type must identify synthetic demo data")
         if listing["is_synthetic"] is not True:
             raise ValueError("all demo listings must be synthetic")
@@ -293,7 +325,13 @@ def generate_listings(
 
     rng = random.Random(seed)
     listings = [_generate_record(rng, index) for index in range(count)]
-    validate_listings(listings, expected_count=count)
+    validate_listings(
+        listings,
+        expected_count=count,
+        expected_listing_type_counts=(
+            DEFAULT_LISTING_TYPE_COUNTS if count == DEFAULT_COUNT else None
+        ),
+    )
     return listings
 
 
@@ -311,6 +349,85 @@ def write_csv(listings: list[dict[str, Any]], csv_path: str | Path) -> Path:
     return path
 
 
+def backup_existing_demo_listings(
+    database_path: str | Path, backup_path: str | Path
+) -> Path | None:
+    """Export the currently marked demo rows before a seed replacement.
+
+    Only rows explicitly marked as synthetic demo inventory are exported. The
+    database is opened read-only so this safeguard cannot change application
+    data while preparing the backup.
+    """
+
+    database = Path(database_path).expanduser().resolve()
+    if not database.is_file():
+        return None
+
+    with duckdb.connect(str(database), read_only=True) as connection:
+        demo_type = object_type(connection, DEMO_SOURCE_TABLE)
+        canonical_type = object_type(connection, "property_records")
+        if demo_type not in {"BASE TABLE", "VIEW"} and canonical_type != "BASE TABLE":
+            return None
+        if demo_type in {"BASE TABLE", "VIEW"}:
+            cursor = connection.execute(
+                """
+                SELECT *
+                FROM demo_property_listings
+                WHERE source_type = ? AND is_synthetic = TRUE
+                ORDER BY listing_id
+                """,
+                [DEMO_MARKER],
+            )
+        else:
+            cursor = connection.execute(
+                """
+                SELECT
+                    demo_listing_id AS listing_id,
+                    demo_title AS title,
+                    demo_listing_type AS listing_type,
+                    demo_property_type AS property_type,
+                    demo_community AS community,
+                    demo_building_name AS building_name,
+                    demo_bedrooms AS bedrooms,
+                    demo_bathrooms AS bathrooms,
+                    demo_area_sqft::BIGINT AS area_sqft,
+                    demo_price_aed::BIGINT AS price_aed,
+                    demo_price_per_sqft_aed AS price_per_sqft_aed,
+                    demo_furnishing AS furnishing,
+                    demo_view_type AS view_type,
+                    demo_property_condition AS property_condition,
+                    demo_availability_status AS availability_status,
+                    demo_parking_spaces AS parking_spaces,
+                    demo_amenities AS amenities,
+                    demo_description AS description,
+                    demo_currency AS currency,
+                    demo_source_type AS source_type,
+                    demo_is_synthetic AS is_synthetic,
+                    demo_data_notice AS demo_data_notice,
+                    demo_created_date AS created_date
+                FROM property_records
+                WHERE record_kind = 'synthetic_demo_listing'
+                  AND source_table = 'demo_property_listings'
+                  AND is_synthetic_demo = TRUE
+                ORDER BY demo_listing_id
+                """
+            )
+        columns = [description[0] for description in cursor.description]
+        rows = cursor.fetchall()
+
+    requested_backup = Path(backup_path).expanduser().resolve()
+    backup = requested_backup
+    suffix = 1
+    while backup.exists():
+        backup = requested_backup.with_name(
+            f"{requested_backup.stem}.{suffix}{requested_backup.suffix}"
+        )
+        suffix += 1
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=columns).to_csv(backup, index=False)
+    return backup
+
+
 def import_into_duckdb(
     listings: list[dict[str, Any]], database_path: str | Path
 ) -> int:
@@ -319,38 +436,145 @@ def import_into_duckdb(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with duckdb.connect(str(path)) as connection:
-        tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
-        required_tables = {"secondary_sales", "dataset_provenance"}
-        missing_tables = required_tables - tables
-        if missing_tables:
-            raise ValueError(
-                "existing database is missing required historical tables: "
-                f"{sorted(missing_tables)}"
-            )
+        for source_table in ("secondary_sales", "demo_property_listings"):
+            if object_type(connection, source_table) == "BASE TABLE":
+                raise ValueError(
+                    f"{source_table} is still a physical table; run "
+                    "migrate_property_records.py before seeding"
+                )
+        if object_type(connection, "property_records") not in {None, "BASE TABLE"}:
+            raise ValueError("property_records must be a physical canonical table")
 
+        canonical = canonical_frame_from_demo(frame)
+        physical_tables = [
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'main' AND table_type = 'BASE TABLE'
+                """
+            ).fetchall()
+            if row[0] != "property_records"
+        ]
         preserved_counts = {
-            table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in required_tables
+            table: int(
+                connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            )
+            for table in physical_tables
         }
-        connection.register("demo_listings_frame", frame)
-        connection.execute(
-            """
-            CREATE OR REPLACE TABLE demo_property_listings AS
-            SELECT * FROM demo_listings_frame
-            """
-        )
-        connection.unregister("demo_listings_frame")
 
-        for table, expected_count in preserved_counts.items():
-            actual_count = connection.execute(
-                f"SELECT COUNT(*) FROM {table}"
+        try:
+            connection.execute("BEGIN TRANSACTION")
+            create_property_records_table(connection)
+            connection.execute(
+                """
+                DELETE FROM property_records
+                WHERE record_kind = ?
+                  AND source_table = ?
+                  AND is_synthetic_demo = TRUE
+                """,
+                [DEMO_RECORD_KIND, DEMO_SOURCE_TABLE],
+            )
+            connection.register("demo_listings_frame", canonical)
+            try:
+                columns = ", ".join(f'"{column}"' for column in CANONICAL_COLUMNS)
+                connection.execute(
+                    f"""
+                    INSERT INTO property_records ({columns})
+                    SELECT {columns}
+                    FROM demo_listings_frame
+                    """
+                )
+            finally:
+                connection.unregister("demo_listings_frame")
+
+            demo_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM property_records
+                    WHERE record_kind = ?
+                      AND source_table = ?
+                      AND is_synthetic_demo = TRUE
+                    """,
+                    [DEMO_RECORD_KIND, DEMO_SOURCE_TABLE],
+                ).fetchone()[0]
+            )
+            if demo_count != len(listings):
+                raise RuntimeError(
+                    f"demo listing replacement expected {len(listings)} rows, "
+                    f"got {demo_count}"
+                )
+
+            distribution = dict(
+                connection.execute(
+                    """
+                    SELECT listing_purpose, COUNT(*)
+                    FROM property_records
+                    WHERE record_kind = ?
+                      AND source_table = ?
+                      AND is_synthetic_demo = TRUE
+                    GROUP BY listing_purpose
+                    """,
+                    [DEMO_RECORD_KIND, DEMO_SOURCE_TABLE],
+                ).fetchall()
+            )
+            expected_distribution = {
+                listing_type: count
+                for listing_type, count in (
+                    (
+                        listing_type,
+                        sum(item["listing_type"] == listing_type for item in listings),
+                    )
+                    for listing_type in LISTING_TYPES
+                )
+                if count
+            }
+            if distribution != expected_distribution:
+                raise RuntimeError(
+                    "demo listing replacement has the wrong listing type "
+                    f"distribution: expected {expected_distribution}, got {distribution}"
+                )
+
+            duplicate_ids = connection.execute(
+                """
+                SELECT COUNT(*) - COUNT(DISTINCT source_record_id)
+                FROM property_records
+                WHERE record_kind = ?
+                  AND source_table = ?
+                  AND is_synthetic_demo = TRUE
+                """,
+                [DEMO_RECORD_KIND, DEMO_SOURCE_TABLE],
             ).fetchone()[0]
-            if actual_count != expected_count:
-                raise RuntimeError(f"existing table {table} was modified")
+            if duplicate_ids:
+                raise RuntimeError("demo listing replacement contains duplicate IDs")
 
-        return connection.execute(
-            "SELECT COUNT(*) FROM demo_property_listings"
-        ).fetchone()[0]
+            for table, expected_count in preserved_counts.items():
+                actual_count = connection.execute(
+                    f' SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                if actual_count != expected_count:
+                    raise RuntimeError(f"existing table {table} was modified")
+
+            validate_property_records(connection)
+            missing_views = [
+                view
+                for view in ("secondary_sales", "demo_property_listings")
+                if object_type(connection, view) is None
+            ]
+            if missing_views:
+                if len(missing_views) != 2:
+                    raise RuntimeError(
+                        "canonical database is missing one compatibility view"
+                    )
+                create_compatibility_views(connection)
+
+            connection.execute("COMMIT")
+            return demo_count
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
 
 
 def generate_and_import(
@@ -359,21 +583,36 @@ def generate_and_import(
     database_path: str | Path | None = None,
     count: int = DEFAULT_COUNT,
     seed: int = DEFAULT_SEED,
+    backup_path: str | Path | None = DEFAULT_BACKUP_PATH,
 ) -> dict[str, Any]:
     listings = generate_listings(count=count, seed=seed)
-    written_csv = write_csv(listings, csv_path)
     database = (
         Path(database_path).expanduser().resolve()
         if database_path
         else default_database_path().resolve()
     )
+    backup = (
+        backup_existing_demo_listings(database, backup_path)
+        if backup_path is not None
+        else None
+    )
+    written_csv = write_csv(listings, csv_path)
     imported_rows = import_into_duckdb(listings, database)
     return {
         "csv_path": str(written_csv),
         "database_path": str(database),
-        "table": "demo_property_listings",
+        "backup_path": str(backup) if backup is not None else None,
+        "table": "property_records",
         "row_count": imported_rows,
         "seed": seed,
+        "listing_type_counts": DEFAULT_LISTING_TYPE_COUNTS
+        if count == DEFAULT_COUNT
+        else {
+            listing_type: sum(
+                listing["listing_type"] == listing_type for listing in listings
+            )
+            for listing_type in LISTING_TYPES
+        },
     }
 
 
@@ -397,6 +636,11 @@ def main() -> None:
         default=str(default_database_path()),
         help="Existing DuckDB database path",
     )
+    parser.add_argument(
+        "--backup",
+        default=str(DEFAULT_BACKUP_PATH),
+        help="CSV backup path for existing synthetic demo rows",
+    )
     args = parser.parse_args()
     print(
         json.dumps(
@@ -405,6 +649,7 @@ def main() -> None:
                 database_path=args.database,
                 count=args.count,
                 seed=args.seed,
+                backup_path=args.backup,
             ),
             indent=2,
         )

@@ -16,6 +16,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { BrowserLatencyRecorder } from "@/lib/latency";
+import { AudioTurnDetector } from "@/lib/audio-turn-detector";
 
 export default function VoiceForceLatency() {
   const session = useSessionContext();
@@ -33,6 +34,7 @@ export default function VoiceForceLatency() {
       trackRef.publication.kind === Track.Kind.Audio,
   );
   const recorderRef = useRef<BrowserLatencyRecorder | null>(null);
+  const remoteTrack = agent.microphoneTrack?.publication.track;
   const [browserSessionId] = useState(createBrowserSessionId);
   const recorder = useMemo(
     () =>
@@ -87,7 +89,7 @@ export default function VoiceForceLatency() {
 
   useEffect(() => {
     const recorder = recorderRef.current;
-    const microphone = session.local.microphoneTrack;
+    const microphone = session.local.microphoneTrack?.publication.track;
     if (!recorder || !microphone) return;
 
     recorder.record({
@@ -105,6 +107,73 @@ export default function VoiceForceLatency() {
       labels: { source: microphone.source },
     });
   }, [session.local.microphoneTrack]);
+
+  useEffect(() => {
+    const microphone = session.local.microphoneTrack?.publication.track;
+    if (!microphone || !remoteTrack || typeof AudioContext === "undefined") return;
+
+    // This measures signal activity in the browser, not acoustic speaker output.
+    const audioContext = new AudioContext();
+    const localSource = audioContext.createMediaStreamSource(
+      new MediaStream([microphone.mediaStreamTrack]),
+    );
+    const remoteSource = audioContext.createMediaStreamSource(
+      new MediaStream([remoteTrack.mediaStreamTrack]),
+    );
+    const localAnalyser = audioContext.createAnalyser();
+    const remoteAnalyser = audioContext.createAnalyser();
+    localAnalyser.fftSize = remoteAnalyser.fftSize = 1024;
+    localSource.connect(localAnalyser);
+    remoteSource.connect(remoteAnalyser);
+    const samples = new Float32Array(1024);
+    const level = (analyser: AnalyserNode) => {
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (const sample of samples) sum += sample * sample;
+      return Math.sqrt(sum / samples.length);
+    };
+
+    const detector = new AudioTurnDetector();
+    const poll = window.setInterval(() => {
+      if (audioContext.state !== "running") return;
+      const now = performance.now();
+      const local = !microphone.isMuted && level(localAnalyser) >= 0.015;
+      const remote = !remoteTrack.isMuted && level(remoteAnalyser) >= 0.008;
+      const delay = detector.update(now, local, remote);
+      if (delay !== null) {
+        const turnId = createBrowserSessionId();
+        recorder.record({
+          stage: "caller_audio_estimate",
+          metric: "caller_speech_end_to_remote_signal",
+          value: delay,
+          unit: "seconds",
+          turn_id: turnId,
+          labels: {
+            measurement: "browser_audio_signal_proxy",
+            response_kind: "unclassified",
+            threshold_local: 0.015,
+            threshold_remote: 0.008,
+          },
+        });
+        recorder.record({
+          stage: "caller_audio_estimate",
+          metric: "caller_speech_end_to_substantive_answer",
+          unit: "seconds",
+          turn_id: turnId,
+          available: false,
+          missing_reason: "audio activity alone cannot distinguish acknowledgement from answer",
+        });
+      }
+    }, 20);
+
+    void audioContext.resume().catch(() => undefined);
+    return () => {
+      window.clearInterval(poll);
+      localSource.disconnect();
+      remoteSource.disconnect();
+      void audioContext.close();
+    };
+  }, [recorder, remoteTrack, session.local.microphoneTrack]);
 
   useEffect(() => {
     const recorder = recorderRef.current;

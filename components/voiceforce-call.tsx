@@ -5,10 +5,9 @@ import {
   useAgent,
   useSession,
   useSessionContext,
-  useSessionMessages,
 } from "@livekit/components-react";
 import { RoomEvent, TokenSource } from "livekit-client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import VoiceForceLatency from "@/components/voiceforce-latency";
 
@@ -21,6 +20,7 @@ export default function VoiceForceCall() {
   const session = useSession(TOKEN_SOURCE, {
     agentName: AGENT_NAME,
     deployment: AGENT_DEPLOYMENT,
+    agentConnectTimeoutMilliseconds: 45_000,
   });
 
   return (
@@ -33,15 +33,74 @@ export default function VoiceForceCall() {
 function CallPanel() {
   const session = useSessionContext();
   const agent = useAgent(session);
-  const { messages } = useSessionMessages(session);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [welcomeStatus, setWelcomeStatus] = useState<WelcomeStatus>({
     phase: "idle",
   });
+  const startAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const room = session.room;
+    const transcriptionTopic = "lk.transcription";
+
+    room.registerTextStreamHandler(
+      transcriptionTopic,
+      async (reader, participantInfo) => {
+        const isAgentMessage =
+          participantInfo.identity !== room.localParticipant.identity;
+        const segmentId = reader.info.attributes?.["lk.segment_id"];
+        let message = "";
+
+        try {
+          for await (const chunk of reader) {
+            message += chunk;
+            setMessages((currentMessages) => {
+              const existingIndex = currentMessages.findIndex(
+                (currentMessage) =>
+                  currentMessage.id === reader.info.id ||
+                  (segmentId !== undefined &&
+                    currentMessage.segmentId === segmentId),
+              );
+
+              if (existingIndex === -1) {
+                return [
+                  ...currentMessages,
+                  {
+                    id: reader.info.id,
+                    message,
+                    segmentId,
+                    type: isAgentMessage
+                      ? "agentTranscript"
+                      : "userTranscript",
+                  },
+                ];
+              }
+
+              const nextMessages = [...currentMessages];
+              nextMessages[existingIndex] = {
+                ...nextMessages[existingIndex],
+                message,
+                segmentId,
+              };
+              return nextMessages;
+            });
+          }
+        } catch (caughtError) {
+          // A call can end while the final transcript stream is still open.
+          // Consume that expected interruption instead of surfacing an
+          // unhandled DataStreamError from the browser.
+          if (room.state !== "disconnected") {
+            setError(
+              caughtError instanceof Error
+                ? caughtError.message
+                : "The live transcript stream was interrupted.",
+            );
+          }
+        }
+      },
+    );
 
     function onDataReceived(
       payload: Uint8Array,
@@ -75,9 +134,17 @@ function CallPanel() {
       }
     }
 
+    function onDisconnected() {
+      setMessages([]);
+    }
+
     room.on(RoomEvent.DataReceived, onDataReceived);
+    room.on(RoomEvent.Disconnected, onDisconnected);
+
     return () => {
       room.off(RoomEvent.DataReceived, onDataReceived);
+      room.off(RoomEvent.Disconnected, onDisconnected);
+      room.unregisterTextStreamHandler(transcriptionTopic);
     };
   }, [session.room]);
 
@@ -89,28 +156,39 @@ function CallPanel() {
     setError(null);
     setWelcomeStatus({ phase: "idle" });
     setIsStarting(true);
+    const abortController = new AbortController();
+    startAbortControllerRef.current = abortController;
 
     try {
       await session.start({
+        signal: abortController.signal,
         tracks: {
           microphone: { enabled: true },
         },
       });
     } catch (caughtError) {
-      setError(
-        caughtError instanceof Error
-          ? caughtError.message
-          : "Unable to start the call.",
-      );
+      if (!abortController.signal.aborted) {
+        setError(
+          caughtError instanceof Error
+            ? caughtError.message
+            : "Unable to start the call.",
+        );
+      }
       await session.end().catch(() => undefined);
     } finally {
-      setIsStarting(false);
+      if (startAbortControllerRef.current === abortController) {
+        startAbortControllerRef.current = null;
+        setIsStarting(false);
+      }
     }
   }
 
   async function endCall() {
+    startAbortControllerRef.current?.abort();
+    startAbortControllerRef.current = null;
+    setIsStarting(false);
     setError(null);
-    await session.end();
+    await session.end().catch(() => undefined);
     setWelcomeStatus({ phase: "idle" });
   }
 
@@ -270,11 +348,16 @@ type WelcomeStatus = {
   errorType?: string;
 };
 
+type TranscriptMessage = {
+  id: string;
+  message: string;
+  segmentId?: string;
+  type: "agentTranscript" | "userTranscript";
+};
+
 function getWelcomeStatus(status: WelcomeStatus) {
   if (status.phase === "introducing") {
-    return status.label
-      ? `Introducing ${status.label}`
-      : "Introducing language assistants";
+    return status.label ?? "Choosing your language";
   }
 
   if (status.phase === "listening") {
@@ -292,10 +375,10 @@ function getWelcomeStatus(status: WelcomeStatus) {
   }
 
   if (status.phase === "failed") {
-    return "The language welcome sequence could not be completed";
+    return "The language selection prompt could not be completed";
   }
 
-  return "Preparing language assistants";
+  return "Preparing language selection";
 }
 
 function getStatusColor(state: ReturnType<typeof useAgent>["state"]) {

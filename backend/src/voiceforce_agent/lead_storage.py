@@ -85,9 +85,12 @@ class DemoLeadDatabase:
         placeholders = ", ".join("?" for _ in normalized_ids)
         rows = connection.execute(
             f"""
-            SELECT listing_id
-            FROM demo_property_listings
-            WHERE listing_id IN ({placeholders})
+            SELECT source_record_id
+            FROM property_records
+            WHERE record_kind = 'synthetic_demo_listing'
+              AND source_table = 'demo_property_listings'
+              AND is_synthetic_demo = TRUE
+              AND source_record_id IN ({placeholders})
             """,
             normalized_ids,
         ).fetchall()

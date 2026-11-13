@@ -94,6 +94,78 @@ def test_recorder_adds_stable_session_labels_without_changing_session_id() -> No
     assert captured[0]["labels"] == {"room_name": "console"}
 
 
+def test_speech_created_marks_automatic_generation_without_assuming_speculation() -> (
+    None
+):
+    recorder = LatencyRecorder("job-1")
+    captured: list[dict] = []
+    recorder._queue.put_nowait = captured.append  # type: ignore[method-assign]
+
+    recorder.record_speech_created(
+        SimpleNamespace(
+            speech_handle=SimpleNamespace(id="speech-1"),
+            source="generate_reply",
+            user_initiated=False,
+        )
+    )
+
+    assert captured[0]["labels"] == {
+        "source": "generate_reply",
+        "user_initiated": False,
+        "generation_kind": "automatic",
+    }
+
+
+def test_completed_speech_links_items_and_calls_without_content() -> None:
+    recorder = LatencyRecorder("job-1")
+    captured: list[dict] = []
+    recorder._queue.put_nowait = captured.append  # type: ignore[method-assign]
+    recorder.record_speech_item_links(
+        SimpleNamespace(
+            id="speech-1",
+            chat_items=[
+                SimpleNamespace(
+                    type="message", id="reply-1", role="assistant", content="private"
+                ),
+                SimpleNamespace(
+                    type="function_call",
+                    id="item-2",
+                    call_id="call-1",
+                    arguments="secret",
+                ),
+            ],
+        )
+    )
+    assert [
+        (r["metric"], r["speech_id"], r["turn_id"], r["request_id"]) for r in captured
+    ] == [
+        ("speech_item_link", "speech-1", "reply-1", None),
+        ("speech_tool_link", "speech-1", None, "call-1"),
+    ]
+    assert "private" not in str(captured) and "secret" not in str(captured)
+
+
+def test_session_summary_keeps_model_and_benchmark_labels() -> None:
+    recorder = LatencyRecorder(
+        "job-1",
+        session_labels={
+            "llm_model": "openai/gpt-5.6-luna",
+            "llm_reasoning_effort": "none",
+            "benchmark_cold_warm": "warm",
+        },
+    )
+    captured: list[dict] = []
+    recorder._queue.put_nowait = captured.append  # type: ignore[method-assign]
+
+    recorder.record_session_summary({"job_id": "job-1"})
+
+    assert captured[0]["labels"] == {
+        "llm_model": "openai/gpt-5.6-luna",
+        "llm_reasoning_effort": "none",
+        "benchmark_cold_warm": "warm",
+    }
+
+
 def test_component_metrics_keep_speech_id_and_record_unavailable_values() -> None:
     recorder = LatencyRecorder("room-1")
     captured: list[dict] = []
@@ -183,6 +255,38 @@ def test_assistant_turn_metrics_capture_latency_rates_and_provider_ids() -> None
     assert all(record["available"] for record in records.values())
     assert all(record["turn_id"] == "assistant-turn-1" for record in records.values())
     assert all(record["labels"] == {"role": "assistant"} for record in records.values())
+
+
+def test_interrupted_assistant_turn_is_recorded_for_preemptive_tts_analysis() -> None:
+    message = ChatMessage(
+        role="assistant",
+        content=[],
+        id="assistant-interrupted-1",
+        interrupted=True,
+    )
+
+    records = _capture_conversation_records(message)
+
+    interrupted = [
+        record for record in records if record["metric"] == "speech_interrupted"
+    ]
+    assert len(interrupted) == 1
+    assert interrupted[0]["value"] == 1
+    assert interrupted[0]["source"] == "conversation_item.interrupted"
+
+
+def test_slow_response_records_observed_stages_without_inventing_correlation() -> None:
+    message = ChatMessage(role="assistant", content=[], id="slow-turn")
+    message.metrics = {"e2e_latency": 4.1, "llm_node_ttft": 1.2, "tts_node_ttfb": 0.3}
+    records = _capture_conversation_records(message)
+    slow = [record for record in records if record["metric"] == "slow_response"]
+    assert len(slow) == 1
+    assert slow[0]["value"] == 4.1
+    assert slow[0]["turn_id"] == "slow-turn"
+    assert slow[0]["labels"]["llm_node_ttft"] == 1.2
+    assert slow[0]["labels"]["tts_node_ttfb"] == 0.3
+    assert "speech_id" in slow[0]["labels"]["missing_correlation"]
+    assert "llm_node_ttfs" in slow[0]["labels"]["missing_stages"]
 
 
 @pytest.mark.parametrize("metrics", [{}, None])

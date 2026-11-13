@@ -43,6 +43,26 @@ remote audio RTC stats sample.
 
 Browser records prove the following only:
 
+- `caller_audio_estimate.caller_speech_end_to_remote_signal` is a browser-clock
+  estimate from microphone signal activity to the next agent-track signal. It
+  has a browser-local `turn_id`; it is not the backend turn ID and cannot prove
+  acoustic speaker playback. Speech thresholds, background noise, echo, muted
+  tracks, and browser scheduling can affect it. Its response kind is
+  `unclassified`: it does not distinguish an acknowledgement from an answer.
+  Compare it with a stopwatch or audio simulation, and keep it separate from
+  backend latency metrics.
+- `caller_speech_end_to_substantive_answer` is explicitly unavailable when
+  audio activity cannot establish whether speech was an acknowledgement or the
+  answer. The detector rejects overlapping signals and short noise, but it has
+  not been calibrated as an acoustic stopwatch.
+- `agent_turn.slow_response` records backend E2E values over three seconds,
+  alongside SDK-reported stage values and explicit missing correlation fields.
+  These records use the assistant item ID; they do not infer a caller turn ID.
+
+The experimental `VOICEFORCE_FAST_PROPERTY_RESULTS=true` enables a localized
+template for complete demo search results. It is disabled by default until the
+controlled voice-quality and latency benchmark meets its promotion gates.
+
 - `start_requested`: the React session start path was invoked.
 - `connection_state`, `connected`, and `disconnected`: the LiveKit client
   observed the corresponding room state transition.
@@ -140,6 +160,15 @@ aggregates, and chronological diagnostics only for records with explicit IDs.
 Missing or incomplete metrics remain null and are never treated as zero. Backend
 and browser timelines remain separate by clock domain; the report never derives
 an E2E value by summing overlapping components.
+
+Completed LiveKit speech handles link their chat items and tool-call IDs in the
+backend report. Where the SDK provides them, scheduled acknowledgement and
+fast-result speech IDs are linked as well. A turn or speech filter includes its
+explicitly linked records within the same session and clock domain. The
+`slow_responses` list contains each recorded backend response over three seconds;
+use `--diagnostic` for its linked timeline and missing stages. These backend
+records do not establish when the caller heard audio, and the browser signal
+estimate still requires calibration against recorded or simulated speech.
 
 The six controlled benchmark scenario definitions are in
 `backend/scenarios/voice_latency_benchmark.yaml`. For debugger audio runs, keep

@@ -5,6 +5,7 @@ export type BrowserMetric = {
   metric: string;
   value?: number | null;
   unit: string;
+  turn_id?: string;
   labels?: Record<string, string | number | boolean | null | undefined>;
   available?: boolean;
   missing_reason?: string;
@@ -37,6 +38,7 @@ export class BrowserLatencyRecorder {
       schema_version: 1,
       record_type: "metric",
       session_id: sessionId || "unknown",
+      ...(metric.turn_id ? { turn_id: metric.turn_id } : {}),
       timestamp: new Date().toISOString(),
       monotonic_ms:
         typeof performance === "undefined" ? null : performance.now(),

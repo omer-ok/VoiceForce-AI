@@ -432,6 +432,47 @@ class LatencyRecorder:
         else:
             return
 
+        e2e = (
+            _turn_metric_value(metrics, "e2e_latency") if role == "assistant" else None
+        )
+        if isinstance(e2e, (int, float)) and e2e > 3.0:
+            stage_values = {
+                name: _turn_metric_value(metrics, name)
+                for name in (
+                    "llm_node_ttft",
+                    "llm_node_ttfs",
+                    "tts_node_ttfb",
+                    "playback_latency",
+                )
+            }
+            self.record_metric(
+                stage="agent_turn",
+                metric="slow_response",
+                value=e2e,
+                unit="seconds",
+                source="conversation_item.metrics",
+                turn_id=turn_id,
+                labels={
+                    **stage_values,
+                    "interrupted": bool(getattr(item, "interrupted", False)),
+                    "missing_correlation": "caller_turn_id,speech_id,tool_call_id,acknowledgement",
+                    "missing_stages": ",".join(
+                        key for key, value in stage_values.items() if value is None
+                    ),
+                },
+            )
+
+        if role == "assistant" and bool(getattr(item, "interrupted", False)):
+            self.record_metric(
+                stage="agent_speech",
+                metric="speech_interrupted",
+                value=1,
+                unit="event",
+                source="conversation_item.interrupted",
+                turn_id=turn_id,
+                labels={"role": role},
+            )
+
         for field_name, (metric_name, unit) in fields.items():
             value = _turn_metric_value(metrics, field_name)
             labels = {"role": role}
@@ -554,6 +595,8 @@ class LatencyRecorder:
     def record_speech_created(self, event: Any) -> None:
         handle = getattr(event, "speech_handle", None)
         speech_id = getattr(handle, "id", None)
+        user_initiated = bool(getattr(event, "user_initiated", False))
+        source = getattr(event, "source", None)
         self.record_metric(
             stage="agent_speech",
             metric="created",
@@ -561,8 +604,53 @@ class LatencyRecorder:
             unit="event",
             source="session.speech_created",
             speech_id=speech_id,
-            labels={"source": getattr(event, "source", None)},
+            labels={
+                "source": source,
+                "user_initiated": user_initiated,
+                "generation_kind": "direct" if user_initiated else "automatic",
+            },
         )
+        if handle is not None and callable(getattr(handle, "add_done_callback", None)):
+            handle.add_done_callback(self.record_speech_item_links)
+
+    def record_speech_item_links(self, handle: Any) -> None:
+        """Link only IDs explicitly exposed by the completed SDK speech handle."""
+        speech_id = getattr(handle, "id", None)
+        if not isinstance(speech_id, str) or not speech_id:
+            return
+        for item in getattr(handle, "chat_items", ()):
+            item_type = getattr(item, "type", None)
+            item_id = getattr(item, "id", None)
+            call_id = getattr(item, "call_id", None)
+            if item_type == "message" and isinstance(item_id, str) and item_id:
+                self.record_metric(
+                    stage="correlation",
+                    metric="speech_item_link",
+                    value=1,
+                    unit="event",
+                    source="speech_handle.chat_items",
+                    speech_id=speech_id,
+                    turn_id=item_id,
+                    labels={
+                        "item_type": item_type,
+                        "role": getattr(item, "role", None),
+                    },
+                )
+            elif (
+                item_type in {"function_call", "function_call_output"}
+                and isinstance(call_id, str)
+                and call_id
+            ):
+                self.record_metric(
+                    stage="correlation",
+                    metric="speech_tool_link",
+                    value=1,
+                    unit="event",
+                    source="speech_handle.chat_items",
+                    speech_id=speech_id,
+                    request_id=call_id,
+                    labels={"item_type": item_type},
+                )
 
     def record_tool_update(self, event: Any) -> None:
         update = getattr(event, "update", None)
@@ -705,6 +793,8 @@ class LatencyRecorder:
             "source": "job_context.session_report",
             "report": safe_fields,
         }
+        if self.session_labels:
+            record["labels"] = dict(self.session_labels)
         try:
             self._queue.put_nowait(record)
         except asyncio.QueueFull:

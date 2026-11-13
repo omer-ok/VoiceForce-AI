@@ -236,10 +236,11 @@ class DemoPropertyDatabase:
     """Read-only, parameterized queries over synthetic demo inventory."""
 
     _BASE_CLAUSES = (
-        "listing_type = ?",
+        "record_kind = 'synthetic_demo_listing'",
+        "listing_purpose = ?",
         "currency = 'AED'",
-        "source_type = 'synthetic_demo'",
-        "is_synthetic = TRUE",
+        "source_table = 'demo_property_listings'",
+        "is_synthetic_demo = TRUE",
     )
 
     def __init__(self, database_path: str | Path | None = None) -> None:
@@ -464,7 +465,7 @@ class DemoPropertyDatabase:
             clauses.append("lower(community) = lower(?)")
             parameters.append(request.community)
         if request.property_type is not None:
-            clauses.append("lower(property_type) = lower(?)")
+            clauses.append("lower(normalized_property_type) = lower(?)")
             parameters.append(request.property_type)
         if request.bedrooms is not None:
             if len(request.bedrooms) == 1:
@@ -481,35 +482,40 @@ class DemoPropertyDatabase:
             clauses.append("bathrooms = ?")
             parameters.append(request.bathrooms)
         if request.min_budget_aed is not None:
-            clauses.append("price_aed >= ?")
+            clauses.append("price_amount >= ?")
             parameters.append(request.min_budget_aed)
         if request.max_budget_aed is not None:
-            clauses.append("price_aed <= ?")
+            clauses.append("price_amount <= ?")
             parameters.append(request.max_budget_aed)
         if request.furnishing is not None:
             clauses.append("lower(furnishing) = lower(?)")
             parameters.append(request.furnishing)
 
         columns = (
-            "listing_id, title, property_type, community, bedrooms, bathrooms, "
-            "area_sqft, price_aed, furnishing, view_type, description, currency, "
-            "availability_status, created_date"
+            "demo_listing_id AS listing_id, demo_title AS title, "
+            "demo_property_type AS property_type, demo_community AS community, "
+            "demo_bedrooms AS bedrooms, demo_bathrooms AS bathrooms, "
+            "demo_area_sqft::BIGINT AS area_sqft, "
+            "demo_price_aed::BIGINT AS price_aed, demo_furnishing AS furnishing, "
+            "demo_view_type AS view_type, demo_description AS description, "
+            "demo_currency AS currency, demo_availability_status AS availability_status, "
+            "demo_created_date AS created_date"
         )
         where = " AND ".join(clauses)
         query_started = time.monotonic()
         with self._connect() as connection:
             match_count = int(
                 connection.execute(
-                    f"SELECT COUNT(*) FROM demo_property_listings WHERE {where}",
+                    f"SELECT COUNT(*) FROM property_records WHERE {where}",
                     parameters,
                 ).fetchone()[0]
             )
             cursor = connection.execute(
                 f"""
                 SELECT {columns}
-                FROM demo_property_listings
+                FROM property_records
                 WHERE {where}
-                ORDER BY price_aed ASC, listing_id
+                ORDER BY price_amount ASC, source_record_id
                 LIMIT ?
                 """,
                 [*parameters, request.limit],
@@ -560,22 +566,26 @@ class DemoPropertyDatabase:
     def inventory_summary(self) -> dict[str, Any]:
         """Return concise capabilities and counts from the synthetic inventory."""
 
-        base = "currency = 'AED' AND source_type = 'synthetic_demo' AND is_synthetic = TRUE"
+        base = (
+            "record_kind = 'synthetic_demo_listing' "
+            "AND source_table = 'demo_property_listings' "
+            "AND currency = 'AED' AND is_synthetic_demo = TRUE"
+        )
         with self._connect() as connection:
             total = int(
                 connection.execute(
-                    f"SELECT COUNT(*) FROM demo_property_listings WHERE {base}"
+                    f"SELECT COUNT(*) FROM property_records WHERE {base}"
                 ).fetchone()[0]
             )
             transaction_types = [
                 {"listing_type": row[0], "count": int(row[1])}
                 for row in connection.execute(
                     f"""
-                    SELECT listing_type, COUNT(*)
-                    FROM demo_property_listings
+                    SELECT listing_purpose, COUNT(*)
+                    FROM property_records
                     WHERE {base}
-                    GROUP BY listing_type
-                    ORDER BY listing_type
+                    GROUP BY listing_purpose
+                    ORDER BY listing_purpose
                     """
                 ).fetchall()
             ]
@@ -583,11 +593,11 @@ class DemoPropertyDatabase:
                 {"property_type": row[0], "count": int(row[1])}
                 for row in connection.execute(
                     f"""
-                    SELECT property_type, COUNT(*)
-                    FROM demo_property_listings
+                    SELECT normalized_property_type, COUNT(*)
+                    FROM property_records
                     WHERE {base}
-                    GROUP BY property_type
-                    ORDER BY property_type
+                    GROUP BY normalized_property_type
+                    ORDER BY normalized_property_type
                     """
                 ).fetchall()
             ]
@@ -596,7 +606,7 @@ class DemoPropertyDatabase:
                 for row in connection.execute(
                     f"""
                     SELECT community, COUNT(*)
-                    FROM demo_property_listings
+                    FROM property_records
                     WHERE {base}
                     GROUP BY community
                     ORDER BY community
@@ -608,7 +618,7 @@ class DemoPropertyDatabase:
                 for row in connection.execute(
                     f"""
                     SELECT bedrooms, COUNT(*)
-                    FROM demo_property_listings
+                    FROM property_records
                     WHERE {base}
                     GROUP BY bedrooms
                     ORDER BY bedrooms
@@ -625,11 +635,11 @@ class DemoPropertyDatabase:
                 }
                 for row in connection.execute(
                     f"""
-                    SELECT listing_type, COUNT(*), MIN(price_aed), MAX(price_aed)
-                    FROM demo_property_listings
+                    SELECT listing_purpose, COUNT(*), MIN(price_amount), MAX(price_amount)
+                    FROM property_records
                     WHERE {base}
-                    GROUP BY listing_type
-                    ORDER BY listing_type
+                    GROUP BY listing_purpose
+                    ORDER BY listing_purpose
                     """
                 ).fetchall()
             ]
@@ -642,11 +652,11 @@ class DemoPropertyDatabase:
                 }
                 for row in connection.execute(
                     f"""
-                    SELECT listing_type, property_type, community, COUNT(*)
-                    FROM demo_property_listings
+                    SELECT listing_purpose, normalized_property_type, community, COUNT(*)
+                    FROM property_records
                     WHERE {base}
-                    GROUP BY listing_type, property_type, community
-                    ORDER BY listing_type, property_type, community
+                    GROUP BY listing_purpose, normalized_property_type, community
+                    ORDER BY listing_purpose, normalized_property_type, community
                     """
                 ).fetchall()
             ]
@@ -666,6 +676,6 @@ class DemoPropertyDatabase:
             "counts_by_type_and_community": counts_by_type_and_community,
             "notes": [
                 "This is illustrative synthetic demo inventory, not verified live availability.",
-                "The historical secondary_sales table is separate and is not included here.",
+                "Historical transaction records share canonical storage but are excluded from this demo inventory.",
             ],
         }
