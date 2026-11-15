@@ -8,7 +8,14 @@ from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from livekit import rtc
-from livekit.agents import Agent, ChatContext, ModelSettings, RunContext, function_tool
+from livekit.agents import (
+    Agent,
+    ChatContext,
+    ModelSettings,
+    RunContext,
+    ToolResult,
+    function_tool,
+)
 
 from .config import SupportedLanguage
 from .language_router import MultilingualTTSRouter
@@ -172,13 +179,12 @@ class LanguageSelectionAgent(Agent):
 
         confirmations = {
             "en": "English selected. How can I help you with Prime Properties Dubai?",
-            "ur": "اردو منتخب کی گئی ہے۔ میں پرائم پراپرٹیز دبئی میں آپ کی مدد کر سکتا ہوں۔",
+            "ur": "اردو منتخب کی گئی ہے۔ میں پرائم پراپرٹیز دبئی میں آپ کی کیسے مدد کر سکتا ہوں؟",
             "ar": "تم اختيار العربية. كيف يمكنني مساعدتك في برايم بروبرتيز دبي؟",
         }
-        # Returning the new agent and a short result uses LiveKit's documented
-        # tool handoff path: the confirmation is generated before the handoff,
-        # then the same session continues with the receptionist's tools.
-        return receptionist, confirmations[selected_language]
+        receptionist.pending_language_confirmation = confirmations[selected_language]
+        # The receptionist speaks after handoff; do not generate a second reply.
+        return receptionist, ToolResult("Language selected.", reply_required=False)
 
 
 class WelcomeCoordinator:

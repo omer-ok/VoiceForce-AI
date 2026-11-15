@@ -117,12 +117,31 @@ class Receptionist(Agent):
         self.latency_recorder = latency_recorder
         self.session_data = session_data
         self._acknowledged_speech_id: str | None = None
+        self.pending_language_confirmation: str | None = None
         super().__init__(
             instructions=RECEPTIONIST_SYSTEM_PROMPT,
             chat_ctx=chat_ctx,
         )
 
     language_router: MultilingualTTSRouter | None = None
+
+    async def on_enter(self) -> None:
+        """Speak the one-time confirmation after the selected voice is active."""
+        confirmation = self.pending_language_confirmation
+        self.pending_language_confirmation = None
+        if confirmation is None:
+            return
+
+        try:
+            handle = self.session.say(
+                confirmation, allow_interruptions=True, add_to_chat_ctx=True
+            )
+            await handle.wait_for_playout()
+            if (error := handle.exception()) is not None:
+                logger.error("Language confirmation speech failed: %s", error)
+        except RuntimeError as error:
+            if "AgentSession is closing" not in str(error):
+                raise
 
     async def tts_node(
         self,
