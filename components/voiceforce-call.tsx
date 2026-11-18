@@ -12,14 +12,11 @@ import { useEffect, useRef, useState } from "react";
 import VoiceForceLatency from "@/components/voiceforce-latency";
 
 const AGENT_NAME = "voiceforce-receptionist";
-const AGENT_DEPLOYMENT =
-  process.env.NODE_ENV === "development" ? "dev" : undefined;
 const TOKEN_SOURCE = TokenSource.endpoint("/api/token");
 
 export default function VoiceForceCall() {
   const session = useSession(TOKEN_SOURCE, {
     agentName: AGENT_NAME,
-    deployment: AGENT_DEPLOYMENT,
     agentConnectTimeoutMilliseconds: 45_000,
   });
 

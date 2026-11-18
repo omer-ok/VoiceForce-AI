@@ -1,8 +1,9 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# dependencies
-/node_modules
-/.pnp
+# ==========================================
+# Dependencies
+# ==========================================
+node_modules/
+.pnp/
 .pnp.*
 .yarn/*
 !.yarn/patches
@@ -10,40 +11,84 @@
 !.yarn/releases
 !.yarn/versions
 
-# testing
-/coverage
+# Python virtual environments
+.venv/
+venv/
+ENV/
+env/
 
-# next.js
-/.next/
-/out/
+# ==========================================
+# Environment variables and secrets
+# ==========================================
+.env
+.env.*
+.env*
+!.env.example
+!**/.env.example
 
-# production
-/build
+# ==========================================
+# Next.js
+# ==========================================
+.next/
+out/
+.vercel/
 
-# local latency benchmark output
+# ==========================================
+# Build outputs
+# ==========================================
+build/
+dist/
+*.tsbuildinfo
+
+# ==========================================
+# Python cache and tooling
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+.coverage.*
+htmlcov/
+
+# ==========================================
+# Test coverage
+# ==========================================
+coverage/
+
+# ==========================================
+# VoiceForce local benchmark output
+# ==========================================
 /data/latency_metrics*.jsonl
 /backend/data/latency_metrics*.jsonl
 
-# misc
-.DS_Store
-*.pem
-
-# debug
+# ==========================================
+# Logs and temporary files
+# ==========================================
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.tmp
+*.swp
+*~
 
-# env files (can opt-in for committing if needed)
-.env*
-.env
-.env.*
-!.env.example
+# ==========================================
+# OS and IDE files
+# ==========================================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
 
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
+# ==========================================
+# Certificates and private keys
+# ==========================================
+*.pem
+*.key
+*.p12
+*.pfx

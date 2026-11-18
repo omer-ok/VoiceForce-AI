@@ -1,12 +1,19 @@
+
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Optimized production Docker deployment
+  output: "standalone",
+
   experimental: {
     agentFeedback: true,
   },
+
+  // Next.js 16 caching and partial prefetching
   cacheComponents: true,
   partialPrefetching: true,
+
+  // Tailwind CSS Turbopack configuration
   turbopack: {
     rules: {
       "*.css": {

@@ -12,6 +12,7 @@ dependencies = [
     "livekit-agents~=1.8",
     "pandas>=2.2,<3",
     "python-dotenv",
+    "livekit-local-inference==0.3.1",
 ]
 
 [dependency-groups]

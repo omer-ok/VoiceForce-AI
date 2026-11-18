@@ -1,9 +1,8 @@
-import {
-  AccessToken,
-  RoomAgentDispatch,
-  RoomConfiguration,
-} from "livekit-server-sdk";
+
+import { AccessToken } from "livekit-server-sdk";
+import { RoomAgentDispatch, RoomConfiguration } from "@livekit/protocol";
 import { NextRequest, NextResponse } from "next/server";
+
 
 const AGENT_NAME = "voiceforce-receptionist";
 const TOKEN_TTL = "10m";
@@ -15,13 +14,7 @@ function isRecord(value: unknown): value is JsonRecord {
 }
 
 function expectedDeployment(): string | undefined {
-  const configuredDeployment = process.env.LIVEKIT_AGENT_DEPLOYMENT?.trim();
-
-  if (configuredDeployment) {
-    return configuredDeployment;
-  }
-
-  return process.env.NODE_ENV === "development" ? "dev" : undefined;
+  return process.env.LIVEKIT_AGENT_DEPLOYMENT?.trim() || undefined;
 }
 
 function readValidatedRoomConfig(body: unknown): RoomConfiguration {
