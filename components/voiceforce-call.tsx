@@ -17,6 +17,7 @@ const TOKEN_SOURCE = TokenSource.endpoint("/api/token");
 export default function VoiceForceCall() {
   const session = useSession(TOKEN_SOURCE, {
     agentName: AGENT_NAME,
+    deployment: "dev",
     agentConnectTimeoutMilliseconds: 45_000,
   });
 
@@ -133,6 +134,9 @@ function CallPanel() {
 
     function onDisconnected() {
       setMessages([]);
+      setWelcomeStatus({ phase: "idle" });
+      setIsStarting(false);
+      startAbortControllerRef.current = null;
     }
 
     room.on(RoomEvent.DataReceived, onDataReceived);

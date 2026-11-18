@@ -1,18 +1,3 @@
-
-node_modules
-.next
-.git
-.env
-.env.*
-!.env.example
-.DS_Store
-coverage
-.vercel
-backend/.venv
-backend/__pycache__
-backend/.pytest_cache
-backend/.ruff_cache
-cat > .dockerignore <<'EOF'
 node_modules
 .next
 .git
@@ -21,7 +6,11 @@ node_modules
 .env.*
 !.env.example
 .DS_Store
-npm-debug.log*
-Dockerfile*
-README.md
-EOF
+coverage
+.vercel
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.venv
+**/venv
+*.log
